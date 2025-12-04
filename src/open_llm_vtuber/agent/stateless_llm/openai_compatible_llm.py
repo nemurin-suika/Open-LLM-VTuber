@@ -3,6 +3,7 @@ This class is responsible for handling asynchronous interaction with OpenAI API 
 endpoints for language generation.
 """
 import random
+import os
 
 from typing import AsyncIterator, List, Dict, Any
 from openai import (
@@ -49,11 +50,12 @@ class AsyncLLM(StatelessLLMInterface):
         self.temperature = temperature
         self.organization_id = organization_id
         self.project_id = project_id
+        self.llm_api_keys_decode = [os.getenv(env_name) for env_name in llm_api_keys]
         self.client = AsyncOpenAI(
             base_url=base_url,
             organization=organization_id,
             project=project_id,
-            api_key=random.choice(llm_api_keys),
+            api_key=random.choice(self.llm_api_keys_decode),
         )
         self.support_tools = True
 
@@ -215,7 +217,7 @@ class AsyncLLM(StatelessLLMInterface):
                 base_url=self.base_url,
                 organization=self.organization_id,
                 project=self.project_id,
-                api_key=random.choice(llm_api_keys),
+                api_key=random.choice(self.llm_api_keys_decode),
             )
             yield "Error calling the chat endpoint: Rate limit exceeded. Please try again later. See the logs for details."
 
