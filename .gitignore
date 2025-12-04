@@ -76,3 +76,5 @@ private/
 mcp_servers.json
 
 .vscode/
+
+*.lock
