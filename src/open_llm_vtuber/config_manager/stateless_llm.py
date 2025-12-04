@@ -60,6 +60,7 @@ class OpenAICompatibleConfig(StatelessLLMBaseConfig):
 
     base_url: str = Field(..., alias="base_url")
     llm_api_key: str = Field(..., alias="llm_api_key")
+    llm_api_keys: list[str] = Field(..., alias="llm_api_keys")
     model: str = Field(..., alias="model")
     organization_id: str | None = Field(None, alias="organization_id")
     project_id: str | None = Field(None, alias="project_id")
@@ -68,6 +69,7 @@ class OpenAICompatibleConfig(StatelessLLMBaseConfig):
     _OPENAI_COMPATIBLE_DESCRIPTIONS: ClassVar[dict[str, Description]] = {
         "base_url": Description(en="Base URL for the API endpoint", zh="API的URL端点"),
         "llm_api_key": Description(en="API key for authentication", zh="API 认证密钥"),
+        "llm_api_keys": Description(en="API keys for authentication", zh="API 认证密钥"),
         "organization_id": Description(
             en="Organization ID for the API (Optional)", zh="组织 ID (可选)"
         ),

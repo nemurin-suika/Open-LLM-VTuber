@@ -54,7 +54,7 @@ distro==1.9.0
     #   openai
 dnspython==2.7.0
     # via email-validator
-edge-tts==7.0.0
+edge-tts==7.2.3
     # via open-llm-vtuber (pyproject.toml)
 email-validator==2.2.0
     # via fastapi

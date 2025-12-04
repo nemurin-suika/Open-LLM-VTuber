@@ -36,6 +36,7 @@ class LLMFactory:
                 model=kwargs.get("model"),
                 base_url=kwargs.get("base_url"),
                 llm_api_key=kwargs.get("llm_api_key"),
+                llm_api_keys=kwargs.get("llm_api_keys"),
                 organization_id=kwargs.get("organization_id"),
                 project_id=kwargs.get("project_id"),
                 temperature=kwargs.get("temperature"),

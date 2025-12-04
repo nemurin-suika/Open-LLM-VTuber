@@ -1,0 +1,27 @@
+[
+    {
+        "name": "mao_pro",
+        "description": "",
+        "url": "/live2d-models/ya/ya.model3.json",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "kXOffset": 1150,
+        "idleMotionGroupName": "Idle",
+        "emotionMap": {
+            "anger": 3,
+            "disgust": 4,
+            "joy": 0,
+            "sadness": 1,
+            "shyness": 2
+        },
+        "tapMotions": {
+            "HitAreaHead": {
+                "": 1
+            },
+            "HitAreaBody": {
+                "": 1
+            }
+        }
+    }
+]
