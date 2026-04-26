@@ -153,9 +153,11 @@ class LettaConfig(I18nMixin, BaseModel):
 
     host: str = Field("localhost", alias="host")
     port: int = Field(8283, alias="port")
-    id: str = Field(..., alias="id")
+    id: Optional[str] = Field("", alias="id")
     faster_first_response: Optional[bool] = Field(True, alias="faster_first_response")
     segment_method: Literal["regex", "pysbd"] = Field("pysbd", alias="segment_method")
+    model: Optional[str] = Field("google_ai/gemini-2.5-flash", alias="model")
+    embedding: Optional[str] = Field("google_ai/gemini-embedding-2", alias="embedding")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "host": Description(
@@ -166,8 +168,16 @@ class LettaConfig(I18nMixin, BaseModel):
             zh="Letta服务器的端口号（默认：8283）",
         ),
         "id": Description(
-            en="Agent instance ID running on the Letta server",
-            zh="指定Letta服务器上运行的Agent实例id",
+            en="Agent instance ID to use. Leave empty to choose/create one at startup.",
+            zh="指定Letta服务器上运行的Agent实例id，留空则在启动时交互选择",
+        ),
+        "model": Description(
+            en="LLM model handle (e.g. google_ai/gemini-2.5-flash)",
+            zh="LLM 模型标识（例如 google_ai/gemini-2.5-flash）",
+        ),
+        "embedding": Description(
+            en="Embedding model handle (e.g. google_ai/gemini-embedding-2)",
+            zh="嵌入模型标识（例如 google_ai/gemini-embedding-2）",
         ),
     }
 

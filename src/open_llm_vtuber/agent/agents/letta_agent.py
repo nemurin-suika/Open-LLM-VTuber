@@ -1,4 +1,4 @@
-from typing import AsyncIterator, Dict, Any, List, Union
+from typing import AsyncIterator, Dict, Any, List, Optional, Union
 from loguru import logger
 from .agent_interface import AgentInterface
 from ..output_types import SentenceOutput
@@ -18,11 +18,19 @@ from letta_client.types.agents.image_content_param import (
     SourceBase64Image,
 )
 
+_SEP = "=" * 60
 
-def _select_or_create_agent(base_url: str, system_prompt: str) -> str:
+
+def _select_or_create_agent(
+    base_url: str,
+    system_prompt: str,
+    model: str,
+    embedding: str,
+) -> str:
     """
-    Connect to the Letta server, list existing agents for user selection,
-    or create a new one if none exist. Returns the chosen agent ID.
+    Connect to the Letta server, list existing agents for interactive selection,
+    or auto-create one if none exist. Returns the chosen agent ID.
+    After selection/creation, optionally updates the agent's system/model/embedding.
     """
     sync_client = Letta(base_url=base_url)
 
@@ -34,13 +42,15 @@ def _select_or_create_agent(base_url: str, system_prompt: str) -> str:
             "Letta 서버가 실행 중인지 확인하세요."
         )
 
-    print("\n" + "=" * 60)
+    print(f"\n{_SEP}")
     print(f"  Letta 서버: {base_url}")
-    print("=" * 60)
+    print(_SEP)
 
     if not agents:
         print("  등록된 에이전트가 없습니다. 새 에이전트를 생성합니다...")
-        return _create_new_agent(sync_client, system_prompt)
+        agent_id = _create_new_agent(sync_client, system_prompt, model, embedding)
+        # New agent is already created with current settings — no update needed.
+        return agent_id
 
     print("  사용 가능한 에이전트 목록:\n")
     print(f"  {'[0]':6} 새 에이전트 생성")
@@ -53,28 +63,79 @@ def _select_or_create_agent(base_url: str, system_prompt: str) -> str:
         try:
             choice = int(input("  에이전트 번호를 선택하세요: ").strip())
             if choice == 0:
-                return _create_new_agent(sync_client, system_prompt)
+                agent_id = _create_new_agent(sync_client, system_prompt, model, embedding)
+                return agent_id
             if 1 <= choice <= len(agents):
                 selected = agents[choice - 1]
                 print(f"  선택됨: {selected.id}  ({selected.name})")
-                print("=" * 60 + "\n")
+                print(_SEP + "\n")
+                _confirm_and_update(sync_client, selected.id, system_prompt, model, embedding)
                 return selected.id
             print(f"  0 ~ {len(agents)} 사이의 번호를 입력하세요.")
         except ValueError:
             print("  숫자를 입력하세요.")
 
 
-def _create_new_agent(sync_client: Letta, system_prompt: str) -> str:
-    """Create a new agent with the given system prompt and return its ID."""
+def _confirm_and_update(
+    sync_client: Letta,
+    agent_id: str,
+    system_prompt: str,
+    model: str,
+    embedding: str,
+) -> None:
+    """Show the pending update and ask the user whether to apply it."""
+    total_len = len(system_prompt)
+    # Show head (persona) + tail (utils / expression prompt) so the user can
+    # see both sections regardless of how long the persona prompt is.
+    head = system_prompt[:200].replace("\n", " ")
+    tail = system_prompt[-400:].replace("\n", " ") if total_len > 600 else ""
+
+    print(f"\n{_SEP}")
+    print("  에이전트 설정 업데이트 여부 확인")
+    print(_SEP)
+    print(f"  모델:        {model}")
+    print(f"  임베딩:      {embedding}")
+    print(f"  프롬프트 길이: {total_len}자")
+    print(f"  [앞부분] {head}...")
+    if tail:
+        print(f"  [뒷부분] ...{tail}")
+    print(_SEP)
+    logger.debug(f"[letta] system_prompt 전체:\n{system_prompt}")
+
+    while True:
+        answer = input("  이 설정으로 에이전트를 업데이트하시겠습니까? [y/N]: ").strip().lower()
+        if answer in ("y", "yes"):
+            sync_client.agents.update(
+                agent_id,
+                system=system_prompt,
+                model=model,
+                embedding=embedding,
+            )
+            logger.info(f"에이전트 {agent_id} 업데이트 완료.")
+            print(f"  업데이트 완료.\n{_SEP}\n")
+            return
+        if answer in ("n", "no", ""):
+            print(f"  업데이트를 건너뜁니다.\n{_SEP}\n")
+            return
+        print("  y 또는 n을 입력하세요.")
+
+
+def _create_new_agent(
+    sync_client: Letta,
+    system_prompt: str,
+    model: str,
+    embedding: str,
+) -> str:
+    """Create a new agent and return its ID."""
     agent = sync_client.agents.create(
-        model="google_ai/gemini-2.5-flash",
-        embedding="google_ai/gemini-embedding-2",
+        model=model,
+        embedding=embedding,
         system=system_prompt,
         name="Open-LLM-VTuber",
     )
     logger.info(f"새 Letta 에이전트 생성 완료: {agent.id}")
     print(f"  새 에이전트 생성 완료: {agent.id}")
-    print("=" * 60 + "\n")
+    print(_SEP + "\n")
     return agent.id
 
 
@@ -82,8 +143,10 @@ class LettaAgent(AgentInterface):
     """
     Custom Letta class to interface with the Letta server.
 
-    If `id` is not provided in conf.yaml, connects to the Letta server at startup,
+    If `id` is not set in conf.yaml, connects to the Letta server at startup,
     lists available agents for interactive selection, and creates a new one if none exist.
+    After selecting an existing agent, optionally updates its system prompt, model,
+    and embedding to match the current conf.yaml values.
     """
 
     def __init__(
@@ -91,7 +154,9 @@ class LettaAgent(AgentInterface):
         live2d_model,
         id,
         system_prompt: str = "",
-        tts_preprocessor_config: TTSPreprocessorConfig = None,
+        model: str = "google_ai/gemini-2.5-flash",
+        embedding: str = "google_ai/gemini-embedding-2",
+        tts_preprocessor_config: Optional[TTSPreprocessorConfig] = None,
         faster_first_response: bool = True,
         segment_method: str = "pysbd",
         host: str = "localhost",
@@ -101,15 +166,14 @@ class LettaAgent(AgentInterface):
         self.url = f"http://{host}:{port}"
 
         if not id:
-            id = _select_or_create_agent(self.url, system_prompt)
+            id = _select_or_create_agent(self.url, system_prompt, model, embedding)
 
         self.client = AsyncLetta(base_url=self.url)
         self.id = id
         logger.info(f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}")
 
-        # Build the decorated pipeline around the raw token generator.
-        # The decorator chain transforms raw str tokens → SentenceOutput.
-        self._chat = tts_filter(tts_preprocessor_config)(
+        # Build the decorated pipeline: raw str tokens → SentenceOutput
+        self._chat = tts_filter(tts_preprocessor_config)(  # type: ignore[arg-type]
             display_processor()(
                 actions_extractor(live2d_model)(
                     sentence_divider(

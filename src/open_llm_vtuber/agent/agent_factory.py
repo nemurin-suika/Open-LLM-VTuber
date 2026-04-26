@@ -122,6 +122,8 @@ class AgentFactory:
                 live2d_model=live2d_model,
                 id=settings.get("id"),
                 system_prompt=system_prompt,
+                model=settings.get("model", "google_ai/gemini-2.5-flash"),
+                embedding=settings.get("embedding", "google_ai/gemini-embedding-2"),
                 tts_preprocessor_config=tts_preprocessor_config,
                 faster_first_response=settings.get("faster_first_response"),
                 segment_method=settings.get("segment_method"),
