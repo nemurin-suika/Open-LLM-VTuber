@@ -78,7 +78,7 @@ def actions_extractor(live2d_model: Live2dModel):
                 if isinstance(item, SentenceWithTags):
                     sentence = item
                     actions = Actions()
-                    # Only extract emotions for non-tag text
+                    # Only extract emotions/gaze for non-tag text
                     if not any(
                         tag.state in [TagState.START, TagState.END]
                         for tag in sentence.tags
@@ -86,6 +86,9 @@ def actions_extractor(live2d_model: Live2dModel):
                         expressions = live2d_model.extract_emotion(sentence.text)
                         if expressions:
                             actions.expressions = expressions
+                        gaze = live2d_model.extract_gaze(sentence.text)
+                        if gaze:
+                            actions.gaze = gaze
                     yield sentence, actions  # Yield the tuple
                 elif isinstance(item, dict):
                     # Pass through dictionaries

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict
-from typing import List, Optional
+from typing import Dict, List, Optional
 from abc import ABC, abstractmethod
 
 
@@ -10,6 +10,7 @@ class Actions:
     expressions: Optional[List[str] | List[int]] = None
     pictures: Optional[List[str]] = None
     sounds: Optional[List[str]] = None
+    gaze: Optional[Dict[str, float]] = None
 
     def to_dict(self) -> dict:
         """Convert Actions object to a dictionary for JSON serialization"""

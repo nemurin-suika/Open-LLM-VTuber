@@ -142,9 +142,13 @@ class WebSocketServer:
         )
 
         # Mount main frontend last (as catch-all)
+        # frontend/ is a symlink to Open-LLM-VTuber-Web; built output is at dist/web/
+        frontend_dir = "frontend/dist/web"
+        if not os.path.exists(frontend_dir):
+            frontend_dir = "frontend"
         self.app.mount(
             "/",
-            CORSStaticFiles(directory="frontend", html=True),
+            CORSStaticFiles(directory=frontend_dir, html=True),
             name="frontend",
         )
 

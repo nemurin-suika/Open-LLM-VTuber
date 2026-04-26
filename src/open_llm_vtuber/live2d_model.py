@@ -1,6 +1,21 @@
 import json
+import re
 import chardet
+from typing import Dict, Optional
 from loguru import logger
+
+# Gaze direction presets: x = left(-1) to right(+1), y = down(-1) to up(+1)
+GAZE_KEYWORDS: Dict[str, Dict[str, float]] = {
+    "look_left": {"x": -0.8, "y": 0.0},
+    "look_right": {"x": 0.8, "y": 0.0},
+    "look_up": {"x": 0.0, "y": 0.6},
+    "look_down": {"x": 0.0, "y": -0.5},
+    "look_center": {"x": 0.0, "y": 0.0},
+    "look_upleft": {"x": -0.6, "y": 0.5},
+    "look_upright": {"x": 0.6, "y": 0.5},
+    "look_downleft": {"x": -0.6, "y": -0.4},
+    "look_downright": {"x": 0.6, "y": -0.4},
+}
 
 # This class will only prepare the payload for the live2d model
 # the process of sending the payload should be done by the caller
@@ -170,6 +185,50 @@ class Live2dModel:
                     break
             i += 1
         return expression_list
+
+    def extract_gaze(self, text: str) -> Optional[Dict[str, float]]:
+        """
+        Extract gaze direction from [look_*] or [focus:x,y] tags in the text.
+
+        [focus:x,y] uses normalized screen coordinates (0,0=top-left, 1,1=bottom-right).
+        The model's screenPosition in model_dict.json is used as the VTuber's position.
+        Returns a dict {"x": -1..1, "y": -1..1} where x>0=right, y>0=up, or None.
+        """
+        text_lower = text.lower()
+
+        # [focus:x,y] — image-based gaze toward a screen coordinate
+        focus_match = re.search(r"\[focus:([0-9.]+),([0-9.]+)\]", text_lower)
+        if focus_match:
+            focus_x = float(focus_match.group(1))
+            focus_y = float(focus_match.group(2))
+            screen_pos = self.model_info.get("screenPosition", {"x": 0.85, "y": 0.85})
+            vtuber_x = float(screen_pos.get("x", 0.85))
+            vtuber_y = float(screen_pos.get("y", 0.85))
+            # screen Y increases downward, Live2D Y increases upward → invert
+            gaze_x = max(-1.0, min(1.0, (focus_x - vtuber_x) * 2.5))
+            gaze_y = max(-1.0, min(1.0, -(focus_y - vtuber_y) * 2.5))
+            return {"x": gaze_x, "y": gaze_y}
+
+        # [look_*] — text-based directional tag; use the last one found
+        last_gaze = None
+        i = 0
+        while i < len(text_lower):
+            if text_lower[i] == "[":
+                for keyword, gaze in GAZE_KEYWORDS.items():
+                    tag = f"[{keyword}]"
+                    if text_lower[i : i + len(tag)] == tag:
+                        last_gaze = dict(gaze)
+                        i += len(tag) - 1
+                        break
+            i += 1
+        return last_gaze
+
+    def remove_gaze_keywords(self, text: str) -> str:
+        """Remove gaze direction tags ([look_*] and [focus:x,y]) from text."""
+        text = re.sub(r"\[focus:[0-9.]+,[0-9.]+\]", "", text, flags=re.IGNORECASE)
+        for keyword in GAZE_KEYWORDS:
+            text = re.sub(re.escape(f"[{keyword}]"), "", text, flags=re.IGNORECASE)
+        return text
 
     def remove_emotion_keywords(self, target_str: str) -> str:
         """
