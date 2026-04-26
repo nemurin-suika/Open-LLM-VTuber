@@ -27,7 +27,7 @@ dependencies = [
     "ruamel-yaml>=0.18.10",
     "ruff>=0.8.6",
     "scipy>=1.14.1",
-    "sherpa-onnx>=1.10.39",
+    "sherpa-onnx @ file:///Users/nemulin/develop/sherpa-onnx",
     "soundfile>=0.12.1",
     "tomli>=2.2.1",
     "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
@@ -36,7 +36,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "uvicorn[standard]>=0.33.0",
     "websocket-client>=1.8.0",
-    "letta-client>=0.1.100",
+    "letta-client>=1.0.000",
     "duckduckgo-mcp-server>=0.1.1",
 ]
 

@@ -2,6 +2,7 @@
 
 import shutil
 import json
+from datetime import timedelta
 
 from pathlib import Path
 from typing import Dict, Optional, Union, Any
@@ -80,13 +81,17 @@ class ServerRegistry:
                     )
                     continue
 
+            raw_timeout = server_details.get("timeout", None)
+            if isinstance(raw_timeout, (int, float)):
+                raw_timeout = timedelta(seconds=raw_timeout)
+
             self.servers[server_name] = MCPServer(
                 name=server_name,
                 command=command,
                 args=server_details["args"],
                 env=server_details.get("env", None),
                 cwd=server_details.get("cwd", None),
-                timeout=server_details.get("timeout", None),
+                timeout=raw_timeout,
             )
             logger.debug(f"MCPSR: Loaded server: '{server_name}'.")
 

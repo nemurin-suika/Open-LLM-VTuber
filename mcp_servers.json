@@ -7,6 +7,15 @@
       "ddg-search": {
         "command": "uvx",
         "args": ["duckduckgo-mcp-server"]
+      },
+      "claude-code": {
+        "command": "uv",
+        "args": ["run", "python", "mcp_servers/claude_code_server.py"],
+        "cwd": "/Users/nemulin/develop/Open-LLM-VTuber-v1.2.1-en",
+        "env": {
+          "CLAUDE_CODE_CWD": "/Users/nemulin/develop/playground"
+        },
+        "timeout": 40
       }
     }
 }

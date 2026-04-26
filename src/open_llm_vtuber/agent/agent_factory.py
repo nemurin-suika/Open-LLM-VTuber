@@ -121,6 +121,7 @@ class AgentFactory:
             return LettaAgent(
                 live2d_model=live2d_model,
                 id=settings.get("id"),
+                system_prompt=system_prompt,
                 tts_preprocessor_config=tts_preprocessor_config,
                 faster_first_response=settings.get("faster_first_response"),
                 segment_method=settings.get("segment_method"),
