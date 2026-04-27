@@ -1,5 +1,6 @@
 """MCP Client for Open-LLM-Vtuber."""
 
+import time
 from contextlib import AsyncExitStack
 from typing import Dict, Any, List, Callable
 from loguru import logger
@@ -108,7 +109,10 @@ class MCPClient:
         """
         session = await self._ensure_server_running_and_get_session(server_name)
         logger.info(f"MCPC: Calling tool '{tool_name}' on server '{server_name}'...")
+        t0 = time.perf_counter()
         response = await session.call_tool(tool_name, tool_args)
+        elapsed = time.perf_counter() - t0
+        logger.info(f"[PERF] MCP '{tool_name}': {elapsed:.3f}s")
 
         if response.isError:
             error_text = (

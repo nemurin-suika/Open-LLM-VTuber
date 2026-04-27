@@ -1,6 +1,8 @@
 import abc
+import time
 import numpy as np
 import asyncio
+from loguru import logger
 
 
 class ASRInterface(metaclass=abc.ABCMeta):
@@ -22,7 +24,11 @@ class ASRInterface(metaclass=abc.ABCMeta):
         """
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
-        return await asyncio.to_thread(self.transcribe_np, audio)
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(self.transcribe_np, audio)
+        elapsed = time.perf_counter() - t0
+        logger.info(f"[PERF] ASR: {elapsed:.3f}s | \"{result[:60]}{'...' if len(result) > 60 else ''}\"")
+        return result
 
     @abc.abstractmethod
     def transcribe_np(self, audio: np.ndarray) -> str:

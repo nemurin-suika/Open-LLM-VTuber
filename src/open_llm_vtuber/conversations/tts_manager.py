@@ -166,10 +166,15 @@ class TTSTaskManager:
     async def _generate_audio(self, tts_engine: TTSInterface, text: str) -> str:
         """Generate audio file from text"""
         logger.debug(f"🏃Generating audio for '''{text}'''...")
-        return await tts_engine.async_generate_audio(
+        import time
+        t0 = time.perf_counter()
+        result = await tts_engine.async_generate_audio(
             text=text,
             file_name_no_ext=f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}",
         )
+        elapsed = time.perf_counter() - t0
+        logger.info(f"[PERF] TTS: {elapsed:.3f}s | \"{text[:60]}{'...' if len(text) > 60 else ''}\"")
+        return result
 
     def clear(self) -> None:
         """Clear all pending tasks and reset state"""

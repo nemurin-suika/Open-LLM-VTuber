@@ -9,3 +9,4 @@ Your responses are read aloud by a TTS system. Never use any markdown or text fo
 - Horizontal rules: ---
 
 Write plain natural speech only. If you need to enumerate items, use natural connective words like "first", "second", "and", "also" instead.
+Do not wrap words or phrases in any quotation marks or backticks. Never use double quotes (""), single quotes (''), or backticks (``) around any word or expression in your output.
