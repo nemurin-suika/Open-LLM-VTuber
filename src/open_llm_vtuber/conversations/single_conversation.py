@@ -45,9 +45,12 @@ async def process_single_conversation(
     Returns:
         str: Complete response text
     """
+    _IGNORE_TOKEN = "[IGNORE]"
+
     # Create TTSTaskManager for this conversation
     tts_manager = TTSTaskManager()
     full_response = ""  # Initialize full_response here
+    is_voice_ignored = False  # LLM이 호출 대상이 아님을 판단한 경우
 
     try:
         # Send initial signals
@@ -67,17 +70,7 @@ async def process_single_conversation(
             metadata=metadata,
         )
 
-        # Store user message (check if we should skip storing to history)
         skip_history = metadata and metadata.get("skip_history", False)
-        if context.history_uid and not skip_history:
-            store_message(
-                conf_uid=context.character_config.conf_uid,
-                history_uid=context.history_uid,
-                role="human",
-                content=input_text,
-                name=context.character_config.human_name,
-            )
-
         if skip_history:
             logger.debug("Skipping storing user input to history (proactive speak)")
 
@@ -101,6 +94,21 @@ async def process_single_conversation(
                     await websocket_send(json.dumps(output_item))
 
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
+                    # 첫 출력에서 [IGNORE] 감지 시 TTS 없이 무시 처리
+                    if (
+                        not full_response
+                        and isinstance(output_item, SentenceOutput)
+                        and output_item.tts_text.strip() == _IGNORE_TOKEN
+                    ):
+                        is_voice_ignored = True
+                        logger.info(
+                            f"Voice input ignored by LLM (not addressed): '{input_text}'"
+                        )
+                        await websocket_send(
+                            json.dumps({"type": "control", "text": "speech-ignored"})
+                        )
+                        break
+
                     # Handle SentenceOutput or AudioOutput
                     response_part = await process_agent_output(
                         output=output_item,
@@ -137,8 +145,8 @@ async def process_single_conversation(
             # full_response will contain partial response before error
         # --- End processing agent response ---
 
-        # Wait for any pending TTS tasks
-        if tts_manager.task_list:
+        # Wait for any pending TTS tasks (무시된 경우 건너뜀)
+        if not is_voice_ignored and tts_manager.task_list:
             await asyncio.gather(*tts_manager.task_list)
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
@@ -148,16 +156,26 @@ async def process_single_conversation(
             client_uid=client_uid,
         )
 
-        if context.history_uid and full_response:  # Check full_response before storing
-            store_message(
-                conf_uid=context.character_config.conf_uid,
-                history_uid=context.history_uid,
-                role="ai",
-                content=full_response,
-                name=context.character_config.character_name,
-                avatar=context.character_config.avatar,
-            )
-            logger.info(f"AI response: {full_response}")
+        # 무시된 경우 히스토리에 저장하지 않음
+        if not is_voice_ignored and not skip_history and context.history_uid:
+            if input_text:
+                store_message(
+                    conf_uid=context.character_config.conf_uid,
+                    history_uid=context.history_uid,
+                    role="human",
+                    content=input_text,
+                    name=context.character_config.human_name,
+                )
+            if full_response:
+                store_message(
+                    conf_uid=context.character_config.conf_uid,
+                    history_uid=context.history_uid,
+                    role="ai",
+                    content=full_response,
+                    name=context.character_config.character_name,
+                    avatar=context.character_config.avatar,
+                )
+                logger.info(f"AI response: {full_response}")
 
         return full_response  # Return accumulated full_response
 

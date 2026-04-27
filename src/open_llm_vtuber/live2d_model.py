@@ -10,15 +10,15 @@ from loguru import logger
 
 # Gaze direction presets: x = left(-1) to right(+1), y = down(-1) to up(+1)
 GAZE_KEYWORDS: Dict[str, Dict[str, float]] = {
-    "look_left": {"x": -0.8, "y": 0.0},
-    "look_right": {"x": 0.8, "y": 0.0},
-    "look_up": {"x": 0.0, "y": 0.8},
-    "look_down": {"x": 0.0, "y": -0.8},
+    "look_left": {"x": -0.7, "y": 0.0},
+    "look_right": {"x": 0.7, "y": 0.0},
+    "look_up": {"x": 0.0, "y": 0.7},
+    "look_down": {"x": 0.0, "y": -0.7},
     "look_center": {"x": 0.0, "y": 0.0},
-    "look_upleft": {"x": -0.8, "y": 0.8},
-    "look_upright": {"x": 0.8, "y": 0.8},
-    "look_downleft": {"x": -0.8, "y": -0.8},
-    "look_downright": {"x": 0.8, "y": -0.8},
+    "look_upleft": {"x": -0.7, "y": 0.7},
+    "look_upright": {"x": 0.7, "y": 0.7},
+    "look_downleft": {"x": -0.7, "y": -0.7},
+    "look_downright": {"x": 0.7, "y": -0.7},
 }
 
 # This class will only prepare the payload for the live2d model
