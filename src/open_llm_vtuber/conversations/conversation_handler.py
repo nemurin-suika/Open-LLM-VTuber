@@ -11,7 +11,7 @@ from ..chat_history_manager import store_message
 from ..service_context import ServiceContext
 from .group_conversation import process_group_conversation
 from .single_conversation import process_single_conversation
-from .conversation_utils import EMOJI_LIST
+from .conversation_utils import EMOJI_LIST, process_user_input
 from .types import GroupConversationState
 from prompts import prompt_loader
 
@@ -65,8 +65,29 @@ async def handle_conversation_trigger(
     elif msg_type == "text-input":
         user_input = data.get("text", "")
     else:  # mic-audio-end
-        user_input = received_data_buffers[client_uid]
+        audio_buffer = received_data_buffers[client_uid]
         received_data_buffers[client_uid] = np.array([])
+
+        images = data.get("images")
+
+        # ASR 먼저 수행 후 키워드 필터 적용
+        input_text = await process_user_input(
+            audio_buffer, context.asr_engine, websocket.send_text
+        )
+
+        keywords = context.character_config.voice_keyword_filter
+        has_keyword = not keywords or any(
+            kw.lower() in input_text.lower() for kw in keywords
+        )
+
+        if not has_keyword:
+            logger.info(f"Voice input ignored (keyword not found): '{input_text}'")
+            await websocket.send_text(
+                json.dumps({"type": "control", "text": "speech-ignored"})
+            )
+            return
+
+        user_input = input_text
 
     images = data.get("images")
     session_emoji = np.random.choice(EMOJI_LIST)

@@ -1,6 +1,6 @@
 # config_manager/character.py
 from pydantic import Field, field_validator
-from typing import Dict, ClassVar
+from typing import Dict, ClassVar, List
 from .i18n import I18nMixin, Description
 from .asr import ASRConfig
 from .tts import TTSConfig
@@ -19,6 +19,7 @@ class CharacterConfig(I18nMixin):
     character_name: str = Field(default="", alias="character_name")
     human_name: str = Field(default="Human", alias="human_name")
     avatar: str = Field(default="", alias="avatar")
+    voice_keyword_filter: List[str] = Field(default=[], alias="voice_keyword_filter")
     persona_prompt: str = Field(..., alias="persona_prompt")
     agent_config: AgentConfig = Field(..., alias="agent_config")
     asr_config: ASRConfig = Field(..., alias="asr_config")
@@ -66,6 +67,10 @@ class CharacterConfig(I18nMixin):
         ),
         "avatar": Description(
             en="Avatar image path for the character", zh="角色头像图片路径"
+        ),
+        "voice_keyword_filter": Description(
+            en="Keywords that must appear in voice input to trigger LLM response. Empty list disables filtering.",
+            zh="触发LLM响应所需的语音关键词列表。空列表禁用过滤。",
         ),
     }
 
