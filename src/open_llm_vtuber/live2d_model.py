@@ -1,20 +1,24 @@
 import json
+import os
 import re
+import struct
+from typing import Dict, Optional, Tuple
+
 import chardet
-from typing import Dict, Optional
+import numpy as np
 from loguru import logger
 
 # Gaze direction presets: x = left(-1) to right(+1), y = down(-1) to up(+1)
 GAZE_KEYWORDS: Dict[str, Dict[str, float]] = {
     "look_left": {"x": -0.8, "y": 0.0},
     "look_right": {"x": 0.8, "y": 0.0},
-    "look_up": {"x": 0.0, "y": 0.6},
-    "look_down": {"x": 0.0, "y": -0.5},
+    "look_up": {"x": 0.0, "y": 0.8},
+    "look_down": {"x": 0.0, "y": -0.8},
     "look_center": {"x": 0.0, "y": 0.0},
-    "look_upleft": {"x": -0.6, "y": 0.5},
-    "look_upright": {"x": 0.6, "y": 0.5},
-    "look_downleft": {"x": -0.6, "y": -0.4},
-    "look_downright": {"x": 0.6, "y": -0.4},
+    "look_upleft": {"x": -0.8, "y": 0.8},
+    "look_upright": {"x": 0.8, "y": 0.8},
+    "look_downleft": {"x": -0.8, "y": -0.8},
+    "look_downright": {"x": 0.8, "y": -0.8},
 }
 
 # This class will only prepare the payload for the live2d model
@@ -47,6 +51,54 @@ class Live2dModel:
         self.live2d_model_name: str = live2d_model_name
         self.set_model(live2d_model_name)
 
+    # Dynamic screen position updated by frontend in real-time.
+    # Normalized coords (0-1): 0,0=top-left, 1,1=bottom-right.
+    # Falls back to model_dict.json "screenPosition" or (0.85, 0.85) if not set.
+    _dynamic_screen_position: Optional[Dict[str, float]] = None
+    _model_screen_height: float = 0.5  # normalized model height on screen
+
+    # Default eye position ratios used when model_dict.json has no matching field.
+    _DEFAULT_EYE_TOP_RATIO: float = 0.2   # ratio from top   (0=top,  1=bottom)
+    _DEFAULT_EYE_LEFT_RATIO: float = 0.5  # ratio from left  (0=left, 1=right)
+
+    def update_screen_position(self, x: float, y: float, height: float = 0.5) -> None:
+        """Update VTuber's current screen position and model height reported by the frontend."""
+        self._dynamic_screen_position = {"x": float(x), "y": float(y)}
+        self._model_screen_height = float(height)
+
+    def _get_eye_screen_position(self) -> Dict[str, float]:
+        """Return the screen position of the model's eyes (not its NDC center).
+
+        The frontend reports the model's NDC origin (center of the matrix).
+        Eyes may be offset from the origin both vertically and horizontally.
+
+        eyeTopRatio  (0=top,  1=bottom, default 0.2): shifts y upward.
+        eyeLeftRatio (0=left, 1=right,  default 0.5): shifts x left/right.
+        """
+        if self._dynamic_screen_position is not None:
+            center_x = self._dynamic_screen_position["x"]
+            center_y = self._dynamic_screen_position["y"]
+        else:
+            sp = self.model_info.get("screenPosition", {"x": 0.85, "y": 0.85})
+            center_x = float(sp.get("x", 0.85))
+            center_y = float(sp.get("y", 0.85))
+
+        # eyeTopRatio: where the eyes are vertically (0=top, 1=bottom of model).
+        # 0.5 = model center; smaller values shift eye reference upward on screen.
+        eye_top_ratio = float(
+            self.model_info.get("eyeTopRatio", self._DEFAULT_EYE_TOP_RATIO)
+        )
+        eye_y = center_y - (0.5 - eye_top_ratio) * self._model_screen_height
+
+        # eyeLeftRatio: where the eyes are horizontally (0=left, 1=right of model).
+        # 0.5 = model center; smaller values shift eye reference leftward on screen.
+        eye_left_ratio = float(
+            self.model_info.get("eyeLeftRatio", self._DEFAULT_EYE_LEFT_RATIO)
+        )
+        eye_x = center_x + (eye_left_ratio - 0.5) * self._model_screen_height
+
+        return {"x": eye_x, "y": eye_y}
+
     def set_model(self, model_name: str) -> None:
         """
         Set the model with its name and load the model information. This method will initialize the `self.model_info`, `self.emo_map`, and `self.emo_str` attributes.
@@ -66,6 +118,161 @@ class Live2dModel:
         self.emo_str: str = " ".join([f"[{key}]," for key in self.emo_map.keys()])
         # emo_str is a string of the keys in the emoMap dictionary. The keys are enclosed in square brackets.
         # example: `"[fear], [anger], [disgust], [sadness], [joy], [neutral], [surprise]"`
+
+        # Auto-detect eye ratios from the moc3 if not set in model_dict.json
+        self._auto_detect_eye_ratios_if_missing()
+
+    # ------------------------------------------------------------------
+    # Eye-ratio auto-detection from moc3
+    # ------------------------------------------------------------------
+
+    def _auto_detect_eye_ratios_if_missing(self) -> None:
+        """Detect eyeTopRatio / eyeLeftRatio from the moc3 if absent in model_info."""
+        needs_top = "eyeTopRatio" not in self.model_info
+        needs_left = "eyeLeftRatio" not in self.model_info
+        if not (needs_top or needs_left):
+            return
+
+        try:
+            top, left = self._detect_eye_ratios_from_moc3()
+            if needs_top:
+                self.model_info["eyeTopRatio"] = top
+                logger.info(f"Auto-detected eyeTopRatio={top:.3f} from moc3")
+            if needs_left:
+                self.model_info["eyeLeftRatio"] = left
+                logger.info(f"Auto-detected eyeLeftRatio={left:.3f} from moc3")
+        except Exception as e:
+            logger.warning(f"Eye ratio auto-detection failed: {e}. Using defaults.")
+
+    def _resolve_moc3_path(self) -> str:
+        """Return the absolute path to the model's .moc3 file."""
+        url: str = self.model_info.get("url", "")
+        # URL may start with "/" (web-relative); strip it for local FS access
+        model3_path = url.lstrip("/")
+        if not os.path.isfile(model3_path):
+            raise FileNotFoundError(f"model3.json not found at {model3_path!r}")
+
+        raw = open(model3_path, "rb").read()
+        enc = chardet.detect(raw)["encoding"] or "utf-8"
+        model3 = json.loads(raw.decode(enc, errors="replace"))
+
+        moc_rel = model3.get("FileReferences", {}).get("Moc", "")
+        if not moc_rel:
+            raise ValueError("No Moc reference in model3.json")
+
+        moc3_path = os.path.join(os.path.dirname(model3_path), moc_rel)
+        if not os.path.isfile(moc3_path):
+            raise FileNotFoundError(f"moc3 file not found at {moc3_path!r}")
+        return moc3_path
+
+    def _detect_eye_ratios_from_moc3(self) -> Tuple[float, float]:
+        """
+        Parse the moc3 binary to estimate where the character's eyes are located,
+        then return (eyeTopRatio, eyeLeftRatio) as canvas-fraction values.
+
+        The moc3 stores all ArtMesh vertex positions in pixel space.  We read
+        the default-pose positions, convert them to canvas fractions (0=top-left,
+        1=bottom-right), and find the y-band whose horizontal variance is highest
+        (two eye clusters create the widest spread in that axis).
+
+        Returns:
+            (eyeTopRatio, eyeLeftRatio): both in [0, 1]
+        """
+        moc3_path = self._resolve_moc3_path()
+        with open(moc3_path, "rb") as f:
+            data = f.read()
+
+        if data[:4] != b"MOC3":
+            raise ValueError("Not a valid moc3 file")
+
+        def u32(off: int) -> int:
+            return struct.unpack_from("<I", data, off)[0]
+
+        def f32(off: int) -> float:
+            return struct.unpack_from("<f", data, off)[0]
+
+        # --- CountInfo (section 0) ---
+        sec0 = u32(0x40)
+        n_verts_total: int = u32(sec0 + 15 * 4)  # index [15] = total vertex count
+
+        # --- CanvasInfo (section 1): ppu, originX, originY, canvasW, canvasH ---
+        sec1 = u32(0x44)
+        ppu     = f32(sec1 + 0)
+        origin_x = f32(sec1 + 4)
+        origin_y = f32(sec1 + 8)
+        canvas_w = f32(sec1 + 12)
+        canvas_h = f32(sec1 + 16)
+
+        if n_verts_total == 0 or canvas_w == 0 or canvas_h == 0:
+            raise ValueError("Unexpected zero values in moc3 CountInfo/CanvasInfo")
+
+        # --- Locate the vertex-position section ---
+        # It is the first section large enough to hold all vertices (8 bytes each)
+        # and whose float values fall within a plausible coordinate range.
+        max_coord = max(canvas_w, canvas_h) * 2.5
+
+        offsets: list[int] = []
+        for i in range(200):
+            off = u32(0x40 + i * 4)
+            if off == 0 and i > 5:
+                break
+            offsets.append(off)
+
+        vert_sec = None
+        for i, off in enumerate(offsets):
+            size = (offsets[i + 1] - off) if i + 1 < len(offsets) else 0
+            if size < n_verts_total * 8:
+                continue
+            sample = [f32(off + j * 4) for j in range(10)]
+            if all(-max_coord < v < max_coord for v in sample):
+                vert_sec = off
+                break
+
+        if vert_sec is None:
+            raise RuntimeError("Could not locate vertex data in moc3")
+
+        # Read default-pose vertex positions (first n_verts_total pairs)
+        raw_verts = data[vert_sec: vert_sec + n_verts_total * 8]
+        verts = np.frombuffer(raw_verts, dtype="<f4").reshape(n_verts_total, 2)
+
+        # --- Convert pixel coords to canvas fraction (0=top-left, 1=bottom-right) ---
+        frac_x = (verts[:, 0] + origin_x) / canvas_w
+        frac_y = (verts[:, 1] + origin_y) / canvas_h
+
+        # Keep only in-canvas vertices
+        mask = (frac_x > 0.05) & (frac_x < 0.95) & (frac_y > 0.05) & (frac_y < 0.95)
+        fx, fy = frac_x[mask], frac_y[mask]
+        if len(fy) < 50:
+            raise ValueError("Too few in-canvas vertices to detect eye position")
+
+        y_min, y_max = float(fy.min()), float(fy.max())
+
+        # Search for the y-band with highest horizontal spread in the upper face area
+        # (two eyes → higher variance in x than forehead/nose/mouth)
+        face_cutoff = y_min + (y_max - y_min) * 0.45
+        n_bins = 40
+        y_edges = np.linspace(y_min, face_cutoff, n_bins + 1)
+
+        best_var, best_cy = -1.0, (y_min + face_cutoff) / 2
+        for b in range(n_bins):
+            band = (fy >= y_edges[b]) & (fy < y_edges[b + 1])
+            if band.sum() < 15:
+                continue
+            var = float(np.var(fx[band]))
+            if var > best_var:
+                best_var = var
+                best_cy = float((y_edges[b] + y_edges[b + 1]) / 2)
+
+        # Centroid of vertices in the detected eye row
+        eye_band = (fy >= best_cy - 0.05) & (fy < best_cy + 0.05)
+        if eye_band.sum() >= 5:
+            eye_cx = float(fx[eye_band].mean())
+            eye_cy = float(fy[eye_band].mean())
+        else:
+            eye_cx = 0.5
+            eye_cy = best_cy
+
+        return round(eye_cy, 3), round(eye_cx, 3)
 
     def _load_file_content(self, file_path: str) -> str:
         """Load the content of a file with robust encoding handling."""
@@ -197,16 +404,21 @@ class Live2dModel:
         text_lower = text.lower()
 
         # [focus:x,y] — image-based gaze toward a screen coordinate
-        focus_match = re.search(r"\[focus:([0-9.]+),([0-9.]+)\]", text_lower)
+        focus_match = re.search(r"\[focus:\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]", text_lower)
         if focus_match:
             focus_x = float(focus_match.group(1))
             focus_y = float(focus_match.group(2))
-            screen_pos = self.model_info.get("screenPosition", {"x": 0.85, "y": 0.85})
-            vtuber_x = float(screen_pos.get("x", 0.85))
-            vtuber_y = float(screen_pos.get("y", 0.85))
+            eye_pos = self._get_eye_screen_position()
+            vtuber_x = eye_pos["x"]
+            vtuber_y = eye_pos["y"]
             # screen Y increases downward, Live2D Y increases upward → invert
             gaze_x = max(-1.0, min(1.0, (focus_x - vtuber_x) * 2.5))
             gaze_y = max(-1.0, min(1.0, -(focus_y - vtuber_y) * 2.5))
+            logger.debug(
+                f"[focus] target=({focus_x:.3f},{focus_y:.3f}) "
+                f"eye=({vtuber_x:.3f},{vtuber_y:.3f}) "
+                f"→ gaze=({gaze_x:.3f},{gaze_y:.3f})"
+            )
             return {"x": gaze_x, "y": gaze_y}
 
         # [look_*] — text-based directional tag; use the last one found
@@ -225,7 +437,7 @@ class Live2dModel:
 
     def remove_gaze_keywords(self, text: str) -> str:
         """Remove gaze direction tags ([look_*] and [focus:x,y]) from text."""
-        text = re.sub(r"\[focus:[0-9.]+,[0-9.]+\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[focus:\s*[0-9.]+\s*,\s*[0-9.]+\s*\]", "", text, flags=re.IGNORECASE)
         for keyword in GAZE_KEYWORDS:
             text = re.sub(re.escape(f"[{keyword}]"), "", text, flags=re.IGNORECASE)
         return text

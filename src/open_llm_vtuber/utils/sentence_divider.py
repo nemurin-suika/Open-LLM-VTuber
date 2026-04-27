@@ -6,6 +6,20 @@ from langdetect import detect
 from enum import Enum
 from dataclasses import dataclass
 
+_BRACKET_RE = re.compile(r'\[[^\]]*\]')
+_INCOMPLETE_BRACKET_RE = re.compile(r'\[[^\]]*$')
+
+
+def _mask_bracket_content(text: str) -> str:
+    """Replace [...] tags with same-length 'X' chars so inner commas/dots
+    are invisible to punctuation checks and sentence segmenters.
+    Also masks a trailing incomplete bracket (e.g. '[focus:0.' while still
+    streaming) so the partial tag doesn't look like end-punctuation."""
+    result = _BRACKET_RE.sub(lambda m: 'X' * len(m.group()), text)
+    result = _INCOMPLETE_BRACKET_RE.sub(lambda m: 'X' * len(m.group()), result)
+    return result
+
+
 # Constants for additional checks
 COMMAS = [
     ",",
@@ -108,7 +122,7 @@ def is_complete_sentence(text: str) -> bool:
 
 def contains_comma(text: str) -> bool:
     """
-    Check if text contains any comma.
+    Check if text contains any comma outside of [...] tags.
 
     Args:
         text: Text to check
@@ -116,12 +130,13 @@ def contains_comma(text: str) -> bool:
     Returns:
         bool: Whether the text contains a comma
     """
-    return any(comma in text for comma in COMMAS)
+    masked = _mask_bracket_content(text)
+    return any(comma in masked for comma in COMMAS)
 
 
 def comma_splitter(text: str) -> Tuple[str, str]:
     """
-    Process text and split it at the first comma.
+    Process text and split it at the first comma that is outside [...] tags.
     Returns the split text (including the comma) and the remaining text.
 
     Args:
@@ -133,17 +148,23 @@ def comma_splitter(text: str) -> Tuple[str, str]:
     if not text:
         return [], ""
 
-    for comma in COMMAS:
-        if comma in text:
-            split_text = text.split(comma, 1)
-            # Return first part with the comma
-            return split_text[0].strip() + comma, split_text[1].strip()
+    bracket_depth = 0
+    for i, char in enumerate(text):
+        if char == '[':
+            bracket_depth += 1
+        elif char == ']':
+            bracket_depth = max(0, bracket_depth - 1)
+        elif bracket_depth == 0:
+            for comma in COMMAS:
+                end = i + len(comma)
+                if text[i:end] == comma:
+                    return text[:end].strip(), text[end:].strip()
     return text, ""
 
 
 def has_punctuation(text: str) -> bool:
     """
-    Check if the text is a punctuation mark.
+    Check if the text contains any punctuation outside of [...] tags.
 
     Args:
         text: Text to check
@@ -151,15 +172,16 @@ def has_punctuation(text: str) -> bool:
     Returns:
         bool: Whether the text is a punctuation mark
     """
+    masked = _mask_bracket_content(text)
     for punct in COMMAS + END_PUNCTUATIONS:
-        if punct in text:
+        if punct in masked:
             return True
     return False
 
 
 def contains_end_punctuation(text: str) -> bool:
     """
-    Check if text contains any sentence-ending punctuation.
+    Check if text contains any sentence-ending punctuation outside of [...] tags.
 
     Args:
         text: Text to check
@@ -167,7 +189,8 @@ def contains_end_punctuation(text: str) -> bool:
     Returns:
         bool: Whether the text contains ending punctuation
     """
-    return any(punct in text for punct in END_PUNCTUATIONS)
+    masked = _mask_bracket_content(text)
+    return any(punct in masked for punct in END_PUNCTUATIONS)
 
 
 def segment_text_by_regex(text: str) -> Tuple[List[str], str]:
@@ -596,10 +619,47 @@ class SentenceDivider:
         return "".join(self._full_response)
 
     def _segment_text(self, text: str) -> Tuple[List[str], str]:
-        """Segment text using the configured method"""
+        """Segment text using the configured method, treating [...] as opaque.
+
+        Masks bracket tags with same-length 'X' placeholders before passing to
+        the segmenter so that commas/dots inside tags are never treated as
+        sentence boundaries.  The original characters are restored afterwards
+        using character-position alignment (masking preserves string length).
+        """
+        masked = _mask_bracket_content(text)
+
         if self.segment_method == "regex":
-            return segment_text_by_regex(text)
-        return segment_text_by_pysbd(text)
+            masked_sentences, _ = segment_text_by_regex(masked)
+        else:
+            masked_sentences, _ = segment_text_by_pysbd(masked)
+
+        if not masked_sentences:
+            return [], text
+
+        # Restore original text for each segment using position alignment.
+        # Because masked and text have identical lengths, each stripped masked
+        # sentence is a contiguous substring whose start/end indices apply
+        # directly to the original text.
+        original_sentences: List[str] = []
+        search_start = 0
+        last_end = 0
+
+        for masked_sent in masked_sentences:
+            stripped = masked_sent.strip()
+            if not stripped:
+                continue
+            pos = masked.find(stripped, search_start)
+            if pos == -1:
+                # Fallback: use as-is (should not happen)
+                original_sentences.append(masked_sent)
+                continue
+            end = pos + len(stripped)
+            original_sentences.append(text[pos:end])
+            search_start = end
+            last_end = end
+
+        remaining = text[last_end:].lstrip()
+        return original_sentences, remaining
 
     def reset(self):
         """Reset the divider state for a new conversation"""

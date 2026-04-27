@@ -95,6 +95,7 @@ class WebSocketHandler:
             "audio-play-start": self._handle_audio_play_start,
             "request-init-config": self._handle_init_config_request,
             "heartbeat": self._handle_heartbeat,
+            "vtuber-screen-position": self._handle_vtuber_screen_position,
         }
 
     async def handle_new_connection(
@@ -610,3 +611,24 @@ class WebSocketHandler:
             await websocket.send_json({"type": "heartbeat-ack"})
         except Exception as e:
             logger.error(f"Error sending heartbeat acknowledgment: {e}")
+
+    async def _handle_vtuber_screen_position(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Update the VTuber's current screen position for gaze calculation."""
+        try:
+            x = float(data.get("x", 0.85))
+            y = float(data.get("y", 0.85))
+            height = float(data.get("height", 0.5))
+            context = self.client_contexts.get(client_uid)
+            if context and context.live2d_model:
+                context.live2d_model.update_screen_position(x, y, height)
+                eye = context.live2d_model._get_eye_screen_position()
+                logger.info(
+                    f"VTuber position → center=({x:.3f}, {y:.3f}) height={height:.3f} "
+                    f"eyeTopRatio={context.live2d_model.model_info.get('eyeTopRatio', 0.2)} "
+                    f"eyeLeftRatio={context.live2d_model.model_info.get('eyeLeftRatio', 0.5)} "
+                    f"eye=({eye['x']:.3f}, {eye['y']:.3f})"
+                )
+        except Exception as e:
+            logger.error(f"Error updating VTuber screen position: {e}")
