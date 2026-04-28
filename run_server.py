@@ -55,7 +55,12 @@ def check_frontend_submodule(lang=None):
     if lang is None:
         lang = upgrade_manager.lang
 
-    frontend_path = Path(__file__).parent / "frontend" / "index.html"
+    frontend_dir = Path(__file__).parent / "frontend"
+    frontend_path = frontend_dir / "index.html"
+
+    if frontend_dir.is_symlink():
+        return
+
     if not frontend_path.exists():
         if lang == "zh":
             logger.warning("未找到前端子模块，正在尝试初始化子模块...")
