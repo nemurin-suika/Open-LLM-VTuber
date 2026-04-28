@@ -238,9 +238,14 @@ class ServiceContext:
         self.send_text = send_text
         self.client_uid = client_uid
 
-        # Initialize session-specific MCP components
+        # Initialize session-specific MCP components (only for basic_memory_agent)
+        is_basic_memory_agent = (
+            self.character_config.agent_config.conversation_agent_choice
+            == "basic_memory_agent"
+        )
         await self._init_mcp_components(
-            self.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
+            is_basic_memory_agent
+            and self.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
             self.character_config.agent_config.agent_settings.basic_memory_agent.mcp_enabled_servers,
         )
 
@@ -277,9 +282,15 @@ class ServiceContext:
         # init vad from character config
         self.init_vad(config.character_config.vad_config)
 
+        is_basic_memory_agent = (
+            config.character_config.agent_config.conversation_agent_choice
+            == "basic_memory_agent"
+        )
+
         # Initialize shared ToolAdapter if it doesn't exist yet
         if (
-            not self.tool_adapter
+            is_basic_memory_agent
+            and not self.tool_adapter
             and config.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp
         ):
             if not self.mcp_server_registery:
@@ -292,7 +303,8 @@ class ServiceContext:
 
         # Initialize MCP Components before initializing Agent
         await self._init_mcp_components(
-            config.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
+            is_basic_memory_agent
+            and config.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
             config.character_config.agent_config.agent_settings.basic_memory_agent.mcp_enabled_servers,
         )
 
