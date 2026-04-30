@@ -89,6 +89,12 @@ def actions_extractor(live2d_model: Live2dModel):
                         gaze = live2d_model.extract_gaze(sentence.text)
                         if gaze:
                             actions.gaze = gaze
+                        movement = live2d_model.extract_movement(sentence.text)
+                        if movement:
+                            actions.movement = movement
+                        model_scale = live2d_model.extract_model_scale(sentence.text)
+                        if model_scale is not None:
+                            actions.model_scale = model_scale
                     yield sentence, actions  # Yield the tuple
                 elif isinstance(item, dict):
                     # Pass through dictionaries

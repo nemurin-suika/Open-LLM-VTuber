@@ -172,6 +172,32 @@ class TTSFactory:
                 pitch=kwargs.get("pitch"),
                 speed=kwargs.get("speed"),
             )
+        elif engine_type == "irodori_tts":
+            from .irodori_tts import TTSEngine as IrodoriTTSEngine
+
+            return IrodoriTTSEngine(
+                irodori_tts_path=kwargs.get(
+                    "irodori_tts_path", "/Users/nemulin/develop/Irodori-TTS"
+                ),
+                checkpoint=kwargs.get("checkpoint"),
+                hf_checkpoint=kwargs.get(
+                    "hf_checkpoint", "Aratako/Irodori-TTS-500M-v2"
+                ),
+                ref_wav=kwargs.get("ref_wav"),
+                no_ref=kwargs.get("no_ref", False),
+                model_device=kwargs.get("model_device", "auto"),
+                model_precision=kwargs.get("model_precision", "fp32"),
+                codec_repo=kwargs.get(
+                    "codec_repo", "Aratako/Semantic-DACVAE-Japanese-32dim"
+                ),
+                seconds=kwargs.get("seconds", 30.0),
+                num_steps=kwargs.get("num_steps", 40),
+                cfg_scale_text=kwargs.get("cfg_scale_text", 3.0),
+                cfg_scale_caption=kwargs.get("cfg_scale_caption", 3.0),
+                cfg_scale_speaker=kwargs.get("cfg_scale_speaker", 5.0),
+                cfg_guidance_mode=kwargs.get("cfg_guidance_mode", "independent"),
+                seed=kwargs.get("seed"),
+            )
         else:
             raise ValueError(f"Unknown TTS engine type: {engine_type}")
 

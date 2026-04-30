@@ -32,6 +32,7 @@ character_config:
   live2d_model_name: 'mao_pro' # The name of Live2D model. Must be the same as the corresponding name in model_dict.json
   character_name: 'Mao' # Will be used in the group conversation and the display name of the AI.
   avatar: 'mao.png' # Suggest using a square image for the avatar. Save it in the avatars folder. Leave blank to use the first letter of the character name as the avatar.
+  voice_keyword_filter: [] # Keywords required in voice input to trigger LLM. Empty = process all audio. Example: ['Mao', '마오']
   human_name: 'Human' # Will be used in the group conversation and the display name of the human.
 
   # ============== Prompts ==============
@@ -274,7 +275,7 @@ character_config:
     #   'azure_tts', 'pyttsx3_tts', 'edge_tts', 'bark_tts',
     #   'cosyvoice_tts', 'melo_tts', 'coqui_tts',
     #   'fish_api_tts', 'x_tts', 'gpt_sovits_tts', 'sherpa_onnx_tts'
-    #   'minimax_tts'
+    #   'minimax_tts', 'irodori_tts'
 
     azure_tts:
       api_key: 'azure-api-key'
@@ -408,6 +409,36 @@ character_config:
       api_key: 'not-needed' # API key if required by the server
       base_url: 'http://localhost:8880/v1' # Base URL of the TTS server
       file_extension: 'mp3' # Audio file format ('mp3' or 'wav')
+
+    irodori_tts:
+      # Path to the Irodori-TTS repository on disk
+      irodori_tts_path: '/Users/nemulin/develop/Irodori-TTS'
+      # Local checkpoint file (.pt or .safetensors). If not set, downloads from hf_checkpoint.
+      checkpoint: null
+      # HuggingFace repo id (used when checkpoint is null)
+      hf_checkpoint: 'Aratako/Irodori-TTS-500M-v2'
+      # Reference audio for zero-shot voice cloning. Required unless no_ref is true.
+      ref_wav: null
+      # Set to true for VoiceDesign checkpoints that don't need a reference audio.
+      no_ref: false
+      # Inference device: 'auto' (recommended), 'cuda', 'mps', or 'cpu'
+      model_device: 'auto'
+      # Model precision: 'fp32' or 'bf16' (bf16 requires CUDA)
+      model_precision: 'fp32'
+      # DACVAE codec HuggingFace repo id
+      codec_repo: 'Aratako/Semantic-DACVAE-Japanese-32dim'
+      # Maximum audio duration to generate (seconds)
+      seconds: 30.0
+      # Number of Euler integration steps (higher = better quality, slower)
+      num_steps: 40
+      # CFG scales — controls how strongly each condition guides generation
+      cfg_scale_text: 3.0
+      cfg_scale_caption: 3.0
+      cfg_scale_speaker: 5.0
+      # CFG guidance mode: 'independent', 'joint', or 'alternating'
+      cfg_guidance_mode: 'independent'
+      # Sampling seed (null for random)
+      seed: null
 
     # For more details, see: https://platform.minimaxi.com/document/Announcement
     minimax_tts:

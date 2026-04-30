@@ -21,6 +21,28 @@ GAZE_KEYWORDS: Dict[str, Dict[str, float]] = {
     "look_downright": {"x": 0.7, "y": -0.7},
 }
 
+# Model body-movement presets — relative delta per tag (NDC units).
+# Accumulates across multiple tags in the same sentence.
+# "move_center" is special: sets absolute target (0, 0).
+MOVEMENT_KEYWORDS: Dict[str, Dict[str, float]] = {
+    "move_left":      {"dx": -0.45, "dy":  0.0},
+    "move_right":     {"dx":  0.45, "dy":  0.0},
+    "move_up":        {"dx":  0.0,  "dy":  0.3},
+    "move_down":      {"dx":  0.0,  "dy": -0.3},
+    "move_center":    {"abs": 1.0,  "dx":  0.0, "dy": 0.0},  # absolute reset
+    "move_upleft":    {"dx": -0.45, "dy":  0.3},
+    "move_upright":   {"dx":  0.45, "dy":  0.3},
+    "move_downleft":  {"dx": -0.45, "dy": -0.3},
+    "move_downright": {"dx":  0.45, "dy": -0.3},
+}
+
+# Scale multipliers relative to the model's reference (kScale) size
+SCALE_KEYWORDS: Dict[str, float] = {
+    "scale_up":     1.3,
+    "scale_down":   0.75,
+    "scale_normal": 1.0,
+}
+
 # This class will only prepare the payload for the live2d model
 # the process of sending the payload should be done by the caller
 # This class is **Not responsible** for sending the payload to the server
@@ -434,6 +456,65 @@ class Live2dModel:
                         break
             i += 1
         return last_gaze
+
+    def extract_movement(self, text: str) -> Optional[Dict[str, float]]:
+        """Extract body-movement from [move_*] tags.
+
+        Relative tags (move_left, move_right, …) accumulate their deltas so
+        that repeating a tag multiple times compounds the movement.
+        [move_center] resets to absolute (0, 0) and clears accumulated delta.
+
+        Returns:
+            {"dx": float, "dy": float}   – relative delta to apply
+            {"x": 0.0,    "y": 0.0}      – absolute reset (move_center)
+            None if no movement tag found.
+        """
+        text_lower = text.lower()
+        total_dx = 0.0
+        total_dy = 0.0
+        found = False
+        is_abs_reset = False
+
+        i = 0
+        while i < len(text_lower):
+            if text_lower[i] == "[":
+                for keyword, delta in MOVEMENT_KEYWORDS.items():
+                    tag = f"[{keyword}]"
+                    if text_lower[i : i + len(tag)] == tag:
+                        if delta.get("abs"):
+                            # move_center: absolute reset, discard accumulated delta
+                            is_abs_reset = True
+                            total_dx = 0.0
+                            total_dy = 0.0
+                        else:
+                            total_dx += delta["dx"]
+                            total_dy += delta["dy"]
+                        found = True
+                        i += len(tag) - 1
+                        break
+            i += 1
+
+        if not found:
+            return None
+        if is_abs_reset:
+            return {"x": 0.0, "y": 0.0}   # absolute: go to center
+        return {"dx": total_dx, "dy": total_dy}  # relative delta
+
+    def extract_model_scale(self, text: str) -> Optional[float]:
+        """Extract scale multiplier from [scale_*] tags. Returns last found."""
+        text_lower = text.lower()
+        last_scale = None
+        i = 0
+        while i < len(text_lower):
+            if text_lower[i] == "[":
+                for keyword, multiplier in SCALE_KEYWORDS.items():
+                    tag = f"[{keyword}]"
+                    if text_lower[i : i + len(tag)] == tag:
+                        last_scale = multiplier
+                        i += len(tag) - 1
+                        break
+            i += 1
+        return last_scale
 
     def remove_gaze_keywords(self, text: str) -> str:
         """Remove gaze direction tags ([look_*] and [focus:x,y]) from text."""

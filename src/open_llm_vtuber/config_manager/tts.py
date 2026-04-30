@@ -431,6 +431,89 @@ class MinimaxTTSConfig(I18nMixin):
     }
 
 
+class IrodoriTTSConfig(I18nMixin):
+    """Configuration for Irodori-TTS (local Flow Matching TTS with zero-shot voice cloning)."""
+
+    irodori_tts_path: str = Field(
+        "/Users/nemulin/develop/Irodori-TTS", alias="irodori_tts_path"
+    )
+    checkpoint: Optional[str] = Field(None, alias="checkpoint")
+    hf_checkpoint: str = Field("Aratako/Irodori-TTS-500M-v2", alias="hf_checkpoint")
+    ref_wav: Optional[str] = Field(None, alias="ref_wav")
+    no_ref: bool = Field(False, alias="no_ref")
+    model_device: str = Field("auto", alias="model_device")
+    model_precision: Literal["fp32", "bf16"] = Field("fp32", alias="model_precision")
+    codec_repo: str = Field(
+        "Aratako/Semantic-DACVAE-Japanese-32dim", alias="codec_repo"
+    )
+    seconds: float = Field(30.0, alias="seconds")
+    num_steps: int = Field(40, alias="num_steps")
+    cfg_scale_text: float = Field(3.0, alias="cfg_scale_text")
+    cfg_scale_caption: float = Field(3.0, alias="cfg_scale_caption")
+    cfg_scale_speaker: float = Field(5.0, alias="cfg_scale_speaker")
+    cfg_guidance_mode: Literal["independent", "joint", "alternating"] = Field(
+        "independent", alias="cfg_guidance_mode"
+    )
+    seed: Optional[int] = Field(None, alias="seed")
+
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "irodori_tts_path": Description(
+            en="Path to the Irodori-TTS repository on disk",
+            zh="磁盘上 Irodori-TTS 仓库的路径",
+        ),
+        "checkpoint": Description(
+            en="Local checkpoint file path (.pt or .safetensors). If not set, downloads from hf_checkpoint.",
+            zh="本地检查点文件路径（.pt 或 .safetensors）。未设置时从 hf_checkpoint 下载。",
+        ),
+        "hf_checkpoint": Description(
+            en="HuggingFace repo id to download model.safetensors from",
+            zh="用于下载 model.safetensors 的 HuggingFace 仓库 ID",
+        ),
+        "ref_wav": Description(
+            en="Reference audio file path for zero-shot voice cloning",
+            zh="零样本语音克隆的参考音频文件路径",
+        ),
+        "no_ref": Description(
+            en="Run without speaker reference (for VoiceDesign checkpoints)",
+            zh="不使用参考音频运行（用于 VoiceDesign 检查点）",
+        ),
+        "model_device": Description(
+            en="Inference device: auto, cuda, mps, or cpu",
+            zh="推理设备：auto、cuda、mps 或 cpu",
+        ),
+        "model_precision": Description(
+            en="Model precision: fp32 or bf16 (bf16 requires CUDA)",
+            zh="模型精度：fp32 或 bf16（bf16 需要 CUDA）",
+        ),
+        "codec_repo": Description(
+            en="DACVAE codec HuggingFace repo id",
+            zh="DACVAE 编解码器 HuggingFace 仓库 ID",
+        ),
+        "seconds": Description(
+            en="Maximum audio duration to generate (seconds)", zh="生成音频的最大时长（秒）"
+        ),
+        "num_steps": Description(
+            en="Number of Euler integration steps for sampling", zh="采样的欧拉积分步数"
+        ),
+        "cfg_scale_text": Description(
+            en="CFG scale for text conditioning", zh="文本条件的 CFG 系数"
+        ),
+        "cfg_scale_caption": Description(
+            en="CFG scale for caption conditioning", zh="标题条件的 CFG 系数"
+        ),
+        "cfg_scale_speaker": Description(
+            en="CFG scale for speaker conditioning", zh="说话人条件的 CFG 系数"
+        ),
+        "cfg_guidance_mode": Description(
+            en="CFG guidance mode: independent, joint, or alternating",
+            zh="CFG 引导模式：independent、joint 或 alternating",
+        ),
+        "seed": Description(
+            en="Sampling seed (null for random)", zh="采样种子（null 为随机）"
+        ),
+    }
+
+
 class TTSConfig(I18nMixin):
     """Configuration for Text-to-Speech."""
 
@@ -447,9 +530,10 @@ class TTSConfig(I18nMixin):
         "fish_api_tts",
         "sherpa_onnx_tts",
         "siliconflow_tts",
-        "openai_tts",  # Add openai_tts here
+        "openai_tts",
         "spark_tts",
         "minimax_tts",
+        "irodori_tts",
     ] = Field(..., alias="tts_model")
 
     azure_tts: Optional[AzureTTSConfig] = Field(None, alias="azure_tts")
@@ -471,6 +555,7 @@ class TTSConfig(I18nMixin):
     openai_tts: Optional[OpenAITTSConfig] = Field(None, alias="openai_tts")
     spark_tts: Optional[SparkTTSConfig] = Field(None, alias="spark_tts")
     minimax_tts: Optional[MinimaxTTSConfig] = Field(None, alias="minimax_tts")
+    irodori_tts: Optional[IrodoriTTSConfig] = Field(None, alias="irodori_tts")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "tts_model": Description(
@@ -506,6 +591,9 @@ class TTSConfig(I18nMixin):
         "spark_tts": Description(en="Configuration for Spark TTS", zh="Spark TTS 配置"),
         "minimax_tts": Description(
             en="Configuration for Minimax TTS", zh="Minimax TTS 配置"
+        ),
+        "irodori_tts": Description(
+            en="Configuration for Irodori-TTS", zh="Irodori-TTS 配置"
         ),
     }
 
@@ -544,5 +632,7 @@ class TTSConfig(I18nMixin):
             values.spark_tts.model_validate(values.spark_tts.model_dump())
         elif tts_model == "minimax_tts" and values.minimax_tts is not None:
             values.minimax_tts.model_validate(values.minimax_tts.model_dump())
+        elif tts_model == "irodori_tts" and values.irodori_tts is not None:
+            values.irodori_tts.model_validate(values.irodori_tts.model_dump())
 
         return values

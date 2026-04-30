@@ -2,19 +2,19 @@
     {
         "name": "mao_pro",
         "description": "",
-        "url": "/live2d-models/wunv/wunv.model3.json",
-        "kScale": 1.3,
+        "url": "/live2d-models/wanmei_vts/运行文件.model3.json",
+        "kScale": 0.7,
         "initialXshift": 0,
         "initialYshift": 0,
         "kXOffset": 1150,
-        "idleMotionGroupName": "Idle",
+        "defaultEmotion": -1,
         "emotionMap": {
-            "normal": 0,
-            "anger": 4,
-            "disgust": 1,
-            "joy": 5,
-            "sadness": 2,
-            "shyness": 3
+            "화남": 3,
+            "역겨움": 1,
+            "즐거움": 6,
+            "슬픔": 2,
+            "부끄러움": 0,
+            "혼란함": 7
         },
         "tapMotions": {
             "HitAreaHead": {
