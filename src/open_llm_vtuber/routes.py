@@ -12,7 +12,9 @@ from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
 
 
-def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
+def init_client_ws_route(
+    default_context_cache: ServiceContext,
+) -> tuple:
     """
     Create and return API routes for handling the `/client-ws` WebSocket connections.
 
@@ -20,7 +22,8 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
         default_context_cache: Default service context cache for new sessions.
 
     Returns:
-        APIRouter: Configured router with WebSocket endpoint.
+        tuple: (APIRouter, WebSocketHandler) — the handler is exposed so the
+               server can wire up live-platform background tasks.
     """
 
     router = APIRouter()
@@ -42,7 +45,7 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
             await ws_handler.handle_disconnect(client_uid)
             raise
 
-    return router
+    return router, ws_handler
 
 
 def init_proxy_route(server_url: str) -> APIRouter:

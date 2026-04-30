@@ -331,6 +331,49 @@ class WebSocketHandler:
 
         message_handler.cleanup_client(client_uid)
 
+    async def trigger_from_live(self, text: str) -> None:
+        """Trigger a conversation turn from a live platform event.
+
+        Uses the most recently connected client's WebSocket and context.
+        Silently drops the event if no client is connected.
+        """
+        if not self.client_connections:
+            logger.debug("No active clients — dropping live event")
+            return
+        client_uid = next(reversed(self.client_connections))
+        websocket = self.client_connections.get(client_uid)
+        context = self.client_contexts.get(client_uid)
+        if not websocket or not context:
+            return
+        await handle_conversation_trigger(
+            msg_type="text-input",
+            data={"type": "text-input", "text": text},
+            client_uid=client_uid,
+            context=context,
+            websocket=websocket,
+            client_contexts=self.client_contexts,
+            client_connections=self.client_connections,
+            chat_group_manager=self.chat_group_manager,
+            received_data_buffers=self.received_data_buffers,
+            current_conversation_tasks=self.current_conversation_tasks,
+            broadcast_to_group=self.broadcast_to_group,
+        )
+
+    async def start_live_event_loop(self) -> None:
+        """Background loop: consume immediate live events and trigger conversations."""
+        from .live.live_chat_injector import get_immediate_queue
+        queue = get_immediate_queue()
+        logger.info("Live event consumer loop started")
+        try:
+            while True:
+                text = await queue.get()
+                try:
+                    await self.trigger_from_live(text)
+                except Exception as e:
+                    logger.error(f"Error processing live event: {e}")
+        except asyncio.CancelledError:
+            logger.info("Live event consumer loop stopped")
+
     async def broadcast_to_group(
         self, group_members: list[str], message: dict, exclude_uid: str = None
     ) -> None:

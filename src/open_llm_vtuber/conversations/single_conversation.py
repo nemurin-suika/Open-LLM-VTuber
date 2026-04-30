@@ -1,9 +1,14 @@
 from typing import Union, List, Dict, Any, Optional
 import asyncio
 import json
+import re
 import time
 from loguru import logger
 import numpy as np
+
+# Pattern the LLM uses to request a temporary chat restriction.
+# Example: [채팅제한 username]
+_RESTRICT_PATTERN = re.compile(r"\[채팅제한\s+([^\]]+?)\]")
 
 from .conversation_utils import (
     create_batch_input,
@@ -69,6 +74,18 @@ async def process_single_conversation(
         if isinstance(user_input, np.ndarray):
             logger.info(f"[PERF] ASR total: {t_asr_end - t_asr_start:.3f}s")
 
+        # Inject any pending live-platform chats (chzzk, etc.) accumulated since
+        # the last conversation turn. consume_pending_chats() clears the buffer,
+        # so chats are included exactly once regardless of how many turns fire.
+        try:
+            from ..live.live_chat_injector import consume_pending_chats as _consume_live_chats
+            _live_chats = _consume_live_chats()
+            if _live_chats:
+                input_text = f"{input_text}\n\n{_live_chats}" if input_text else _live_chats
+                logger.info(f"Injected live chats into user input")
+        except Exception:
+            pass
+
         # Create batch input
         batch_input = create_batch_input(
             input_text=input_text,
@@ -121,6 +138,23 @@ async def process_single_conversation(
                             json.dumps({"type": "control", "text": "speech-ignored"})
                         )
                         break
+
+                    # [채팅제한 username] 패턴 감지 및 처리
+                    if isinstance(output_item, SentenceOutput):
+                        matches = _RESTRICT_PATTERN.findall(output_item.tts_text)
+                        if matches:
+                            for username in matches:
+                                username = username.strip()
+                                logger.info(f"LLM requested chat restriction: '{username}'")
+                                try:
+                                    from ..live.live_chat_injector import execute_restrict
+                                    asyncio.create_task(execute_restrict(username))
+                                except Exception:
+                                    pass
+                            # Strip the tag from TTS (don't speak it)
+                            output_item.tts_text = _RESTRICT_PATTERN.sub(
+                                "", output_item.tts_text
+                            ).strip()
 
                     # Handle SentenceOutput or AudioOutput
                     response_part = await process_agent_output(

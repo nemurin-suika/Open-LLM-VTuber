@@ -6,10 +6,13 @@ the WebSocket connections, serves static files, and manages the web tool.
 It uses FastAPI for the server and Starlette for static file serving.
 """
 
+import asyncio
 import os
 import shutil
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from loguru import logger
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
@@ -72,12 +75,63 @@ class WebSocketServer:
     """
 
     def __init__(self, config: Config, default_context_cache: ServiceContext = None):
-        self.app = FastAPI(title="Open-LLM-VTuber Server")  # Added title for clarity
         self.config = config
-        self.default_context_cache = (
-            default_context_cache or ServiceContext()
-        )  # Use provided context or initialize a new empty one waiting to be loaded
-        # It will be populated during the initialize method call
+        self.default_context_cache = default_context_cache or ServiceContext()
+
+        # Create ws_handler now so the lifespan closure can reference it
+        client_ws_router, ws_handler = init_client_ws_route(
+            default_context_cache=self.default_context_cache
+        )
+
+        chzzk_cfg = config.live_config.chzzk_live
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            tasks = []
+
+            # Configure the live chat injector header
+            from .live.live_chat_injector import configure as _cfg_injector
+            _cfg_injector(header=chzzk_cfg.chat_batch_header)
+
+            # Start the background loop that turns immediate live events into
+            # conversation turns (donations, subscriptions, timer-flushed batches)
+            tasks.append(asyncio.create_task(ws_handler.start_live_event_loop()))
+
+            # Start Chzzk live platform if a channel is configured
+            if chzzk_cfg.channel_id:
+                try:
+                    from .live.chzzk_live import ChzzkLivePlatform
+                    platform = ChzzkLivePlatform(
+                        channel_id=chzzk_cfg.channel_id,
+                        authorization_key=chzzk_cfg.authorization_key,
+                        session_key=chzzk_cfg.session_key,
+                        handle_chat=chzzk_cfg.handle_chat,
+                        handle_donation=chzzk_cfg.handle_donation,
+                        handle_mission=chzzk_cfg.handle_mission,
+                        handle_subscription=chzzk_cfg.handle_subscription,
+                        chat_timeout=chzzk_cfg.chat_timeout,
+                        donation_format=chzzk_cfg.donation_format,
+                        mission_format=chzzk_cfg.mission_format,
+                        subscription_format=chzzk_cfg.subscription_format,
+                    )
+                    tasks.append(asyncio.create_task(platform.run()))
+                    logger.info(
+                        f"Chzzk Live started for channel: {chzzk_cfg.channel_id}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to start Chzzk Live: {e}")
+
+            yield  # server runs here
+
+            # Shutdown: cancel all background tasks
+            for task in tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self.app = FastAPI(title="Open-LLM-VTuber Server", lifespan=lifespan)
 
         # Add global CORS middleware
         self.app.add_middleware(
@@ -88,11 +142,8 @@ class WebSocketServer:
             allow_headers=["*"],
         )
 
-        # Include routes, passing the context instance
-        # The context will be populated during the initialize step
-        self.app.include_router(
-            init_client_ws_route(default_context_cache=self.default_context_cache),
-        )
+        # Include routes
+        self.app.include_router(client_ws_router)
         self.app.include_router(
             init_webtool_routes(default_context_cache=self.default_context_cache),
         )
@@ -100,7 +151,6 @@ class WebSocketServer:
         # Initialize and include proxy routes if proxy is enabled
         system_config = config.system_config
         if hasattr(system_config, "enable_proxy") and system_config.enable_proxy:
-            # Construct the server URL for the proxy
             host = system_config.host
             port = system_config.port
             server_url = f"ws://{host}:{port}/client-ws"
