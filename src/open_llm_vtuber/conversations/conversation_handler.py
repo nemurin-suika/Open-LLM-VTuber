@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 from typing import Dict, Optional, Callable
 
 import numpy as np
@@ -34,17 +35,19 @@ async def handle_conversation_trigger(
 
     if msg_type == "ai-speak-signal":
         try:
-            # Get proactive speak prompt from config
             prompt_name = "proactive_speak_prompt"
             prompt_file = context.system_config.tool_prompts.get(prompt_name)
             if prompt_file:
-                user_input = prompt_loader.load_util(prompt_file)
+                raw = prompt_loader.load_util(prompt_file)
+                variants = [v.strip() for v in raw.split("---") if v.strip()]
+                chosen = random.choice(variants) if variants else raw.strip()
             else:
                 logger.warning("Proactive speak prompt not configured, using default")
-                user_input = "Please say something."
+                chosen = "뭔가 자연스럽게 혼잣말을 해줘."
+            user_input = f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
         except Exception as e:
             logger.error(f"Error loading proactive speak prompt: {e}")
-            user_input = "Please say something."
+            user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
 
         # Add metadata to indicate this is a proactive speak request
         # that should be skipped in both memory and history
