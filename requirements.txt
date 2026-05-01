@@ -2,15 +2,15 @@
 #    uv pip compile pyproject.toml -o requirements.txt
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.11.16
+aiohttp==3.9.3
     # via edge-tts
-aiosignal==1.3.2
+aiosignal==1.3.1
     # via aiohttp
 annotated-types==0.7.0
     # via pydantic
-anthropic==0.49.0
+anthropic==0.75.0
     # via open-llm-vtuber (pyproject.toml)
-anyio==4.9.0
+anyio==4.12.0
     # via
     #   anthropic
     #   groq
@@ -18,73 +18,73 @@ anyio==4.9.0
     #   openai
     #   starlette
     #   watchfiles
-async-timeout==5.0.1
+async-timeout==4.0.3
     # via aiohttp
-attrs==25.3.0
+attrs==23.2.0
     # via aiohttp
-azure-cognitiveservices-speech==1.43.0
+azure-cognitiveservices-speech==1.47.0
     # via open-llm-vtuber (pyproject.toml)
-certifi==2025.1.31
+certifi==2025.11.12
     # via
     #   edge-tts
     #   httpcore
     #   httpx
     #   requests
-cffi==1.17.1
+cffi==2.0.0
     # via soundfile
-cfgv==3.4.0
+cfgv==3.5.0
     # via pre-commit
 chardet==5.2.0
     # via open-llm-vtuber (pyproject.toml)
-charset-normalizer==3.4.1
+charset-normalizer==3.3.2
     # via requests
-click==8.1.8
+click==8.3.1
     # via
     #   rich-toolkit
     #   typer
     #   uvicorn
 coloredlogs==15.0.1
     # via onnxruntime
-distlib==0.3.9
+distlib==0.4.0
     # via virtualenv
 distro==1.9.0
     # via
     #   anthropic
     #   groq
     #   openai
-dnspython==2.7.0
+dnspython==2.8.0
     # via email-validator
 edge-tts==7.2.3
     # via open-llm-vtuber (pyproject.toml)
-email-validator==2.2.0
+email-validator==2.3.0
     # via fastapi
-exceptiongroup==1.2.2
+exceptiongroup==1.3.1
     # via anyio
-fastapi==0.115.12
+fastapi==0.123.7
     # via open-llm-vtuber (pyproject.toml)
-fastapi-cli==0.0.7
+fastapi-cli==0.0.16
     # via fastapi
-filelock==3.18.0
+filelock==3.20.0
     # via
     #   torch
     #   virtualenv
-flatbuffers==25.2.10
+flatbuffers==25.9.23
     # via onnxruntime
-frozenlist==1.5.0
+frozenlist==1.4.1
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2025.3.2
+fsspec==2025.12.0
     # via torch
-groq==0.22.0
+groq==0.37.0
     # via open-llm-vtuber (pyproject.toml)
-h11==0.14.0
+h11==0.16.0
     # via
     #   httpcore
     #   uvicorn
-httpcore==1.0.7
+httpcore==1.0.9
     # via httpx
-httptools==0.6.4
+httptools==0.7.1
     # via uvicorn
 httpx==0.28.1
     # via
@@ -98,9 +98,9 @@ httpx-sse==0.4.0
     # via letta-client
 humanfriendly==10.0
     # via coloredlogs
-identify==2.6.9
+identify==2.6.15
     # via pre-commit
-idna==3.10
+idna==3.6
     # via
     #   anyio
     #   email-validator
@@ -111,29 +111,29 @@ jinja2==3.1.6
     # via
     #   fastapi
     #   torch
-jiter==0.9.0
+jiter==0.12.0
     # via
     #   anthropic
     #   openai
 langdetect==1.0.9
     # via open-llm-vtuber (pyproject.toml)
-letta-client==0.1.101
+letta-client==1.7.12
     # via open-llm-vtuber (pyproject.toml)
 loguru==0.7.3
     # via open-llm-vtuber (pyproject.toml)
-markdown-it-py==3.0.0
+markdown-it-py==4.0.0
     # via rich
-markupsafe==3.0.2
+markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
 mpmath==1.3.0
     # via sympy
-multidict==6.2.0
+multidict==6.0.5
     # via
     #   aiohttp
     #   yarl
-networkx==3.4.2
+networkx==3.6
     # via torch
 nodeenv==1.9.1
     # via pre-commit
@@ -143,44 +143,44 @@ numpy==1.26.4
     #   onnxruntime
     #   scipy
     #   soundfile
-onnxruntime==1.21.0
+onnxruntime==1.23.2
     # via
     #   open-llm-vtuber (pyproject.toml)
     #   silero-vad
-openai==1.72.0
+openai==2.8.1
     # via open-llm-vtuber (pyproject.toml)
-packaging==24.2
+packaging==25.0
     # via onnxruntime
-platformdirs==4.3.7
+platformdirs==4.5.0
     # via virtualenv
-pre-commit==4.2.0
+pre-commit==4.5.0
     # via open-llm-vtuber (pyproject.toml)
 propcache==0.3.1
     # via
     #   aiohttp
     #   yarl
-protobuf==6.30.2
+protobuf==6.33.1
     # via onnxruntime
-pycparser==2.22
+pycparser==2.23
     # via cffi
-pydantic==2.11.3
+pydantic==2.8.2
     # via
     #   anthropic
     #   fastapi
     #   groq
     #   letta-client
     #   openai
-pydantic-core==2.33.1
+pydantic-core==2.20.1
     # via
     #   letta-client
     #   pydantic
 pydub==0.25.1
     # via open-llm-vtuber (pyproject.toml)
-pygments==2.19.1
+pygments==2.19.2
     # via rich
-pyobjc==11.0
+pyobjc==12.1
     # via pyttsx3
-pyobjc-core==11.0
+pyobjc-core==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-accessibility
@@ -332,64 +332,64 @@ pyobjc-core==11.0
     #   pyobjc-framework-virtualization
     #   pyobjc-framework-vision
     #   pyobjc-framework-webkit
-pyobjc-framework-accessibility==11.0
+pyobjc-framework-accessibility==12.1
     # via pyobjc
-pyobjc-framework-accounts==11.0
+pyobjc-framework-accounts==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-cloudkit
-pyobjc-framework-addressbook==11.0
+pyobjc-framework-addressbook==12.1
     # via pyobjc
-pyobjc-framework-adservices==11.0
+pyobjc-framework-adservices==12.1
     # via pyobjc
-pyobjc-framework-adsupport==11.0
+pyobjc-framework-adsupport==12.1
     # via pyobjc
-pyobjc-framework-applescriptkit==11.0
+pyobjc-framework-applescriptkit==12.1
     # via pyobjc
-pyobjc-framework-applescriptobjc==11.0
+pyobjc-framework-applescriptobjc==12.1
     # via pyobjc
-pyobjc-framework-applicationservices==11.0
+pyobjc-framework-applicationservices==12.1
     # via pyobjc
-pyobjc-framework-apptrackingtransparency==11.0
+pyobjc-framework-apptrackingtransparency==12.1
     # via pyobjc
-pyobjc-framework-audiovideobridging==11.0
+pyobjc-framework-audiovideobridging==12.1
     # via pyobjc
-pyobjc-framework-authenticationservices==11.0
+pyobjc-framework-authenticationservices==12.1
     # via pyobjc
-pyobjc-framework-automaticassessmentconfiguration==11.0
+pyobjc-framework-automaticassessmentconfiguration==12.1
     # via pyobjc
-pyobjc-framework-automator==11.0
+pyobjc-framework-automator==12.1
     # via pyobjc
-pyobjc-framework-avfoundation==11.0
+pyobjc-framework-avfoundation==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-cinematic
     #   pyobjc-framework-mediaextension
     #   pyobjc-framework-mediaplayer
     #   pyobjc-framework-phase
-pyobjc-framework-avkit==11.0
+pyobjc-framework-avkit==12.1
     # via pyobjc
-pyobjc-framework-avrouting==11.0
+pyobjc-framework-avrouting==12.1
     # via pyobjc
-pyobjc-framework-backgroundassets==11.0
+pyobjc-framework-backgroundassets==12.1
     # via pyobjc
-pyobjc-framework-browserenginekit==11.0
+pyobjc-framework-browserenginekit==12.1
     # via pyobjc
-pyobjc-framework-businesschat==11.0
+pyobjc-framework-businesschat==12.1
     # via pyobjc
-pyobjc-framework-callkit==11.0
+pyobjc-framework-callkit==12.1
     # via pyobjc
-pyobjc-framework-carbon==11.0
+pyobjc-framework-carbon==12.1
     # via pyobjc
-pyobjc-framework-cfnetwork==11.0
+pyobjc-framework-cfnetwork==12.1
     # via pyobjc
-pyobjc-framework-cinematic==11.0
+pyobjc-framework-cinematic==12.1
     # via pyobjc
-pyobjc-framework-classkit==11.0
+pyobjc-framework-classkit==12.1
     # via pyobjc
-pyobjc-framework-cloudkit==11.0
+pyobjc-framework-cloudkit==12.1
     # via pyobjc
-pyobjc-framework-cocoa==11.0
+pyobjc-framework-cocoa==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-accessibility
@@ -529,37 +529,37 @@ pyobjc-framework-cocoa==11.0
     #   pyobjc-framework-virtualization
     #   pyobjc-framework-vision
     #   pyobjc-framework-webkit
-pyobjc-framework-colorsync==11.0
+pyobjc-framework-colorsync==12.1
     # via pyobjc
-pyobjc-framework-contacts==11.0
+pyobjc-framework-contacts==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-contactsui
-pyobjc-framework-contactsui==11.0
+pyobjc-framework-contactsui==12.1
     # via pyobjc
-pyobjc-framework-coreaudio==11.0
+pyobjc-framework-coreaudio==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-avfoundation
     #   pyobjc-framework-browserenginekit
     #   pyobjc-framework-coreaudiokit
-pyobjc-framework-coreaudiokit==11.0
+pyobjc-framework-coreaudiokit==12.1
     # via pyobjc
-pyobjc-framework-corebluetooth==11.0
+pyobjc-framework-corebluetooth==12.1
     # via pyobjc
-pyobjc-framework-coredata==11.0
+pyobjc-framework-coredata==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-cloudkit
     #   pyobjc-framework-syncservices
-pyobjc-framework-corehaptics==11.0
+pyobjc-framework-corehaptics==12.1
     # via pyobjc
-pyobjc-framework-corelocation==11.0
+pyobjc-framework-corelocation==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-cloudkit
     #   pyobjc-framework-mapkit
-pyobjc-framework-coremedia==11.0
+pyobjc-framework-coremedia==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-avfoundation
@@ -569,185 +569,185 @@ pyobjc-framework-coremedia==11.0
     #   pyobjc-framework-oslog
     #   pyobjc-framework-screencapturekit
     #   pyobjc-framework-videotoolbox
-pyobjc-framework-coremediaio==11.0
+pyobjc-framework-coremediaio==12.1
     # via pyobjc
-pyobjc-framework-coremidi==11.0
+pyobjc-framework-coremidi==12.1
     # via pyobjc
-pyobjc-framework-coreml==11.0
+pyobjc-framework-coreml==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-vision
-pyobjc-framework-coremotion==11.0
+pyobjc-framework-coremotion==12.1
     # via pyobjc
-pyobjc-framework-coreservices==11.0
+pyobjc-framework-coreservices==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-launchservices
     #   pyobjc-framework-searchkit
-pyobjc-framework-corespotlight==11.0
+pyobjc-framework-corespotlight==12.1
     # via pyobjc
-pyobjc-framework-coretext==11.0
+pyobjc-framework-coretext==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-applicationservices
-pyobjc-framework-corewlan==11.0
+pyobjc-framework-corewlan==12.1
     # via pyobjc
-pyobjc-framework-cryptotokenkit==11.0
+pyobjc-framework-cryptotokenkit==12.1
     # via pyobjc
-pyobjc-framework-datadetection==11.0
+pyobjc-framework-datadetection==12.1
     # via pyobjc
-pyobjc-framework-devicecheck==11.0
+pyobjc-framework-devicecheck==12.1
     # via pyobjc
-pyobjc-framework-devicediscoveryextension==11.0
+pyobjc-framework-devicediscoveryextension==12.1
     # via pyobjc
-pyobjc-framework-discrecording==11.0
+pyobjc-framework-discrecording==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-discrecordingui
-pyobjc-framework-discrecordingui==11.0
+pyobjc-framework-discrecordingui==12.1
     # via pyobjc
-pyobjc-framework-diskarbitration==11.0
+pyobjc-framework-diskarbitration==12.1
     # via pyobjc
-pyobjc-framework-dvdplayback==11.0
+pyobjc-framework-dvdplayback==12.1
     # via pyobjc
-pyobjc-framework-eventkit==11.0
+pyobjc-framework-eventkit==12.1
     # via pyobjc
-pyobjc-framework-exceptionhandling==11.0
+pyobjc-framework-exceptionhandling==12.1
     # via pyobjc
-pyobjc-framework-executionpolicy==11.0
+pyobjc-framework-executionpolicy==12.1
     # via pyobjc
-pyobjc-framework-extensionkit==11.0
+pyobjc-framework-extensionkit==12.1
     # via pyobjc
-pyobjc-framework-externalaccessory==11.0
+pyobjc-framework-externalaccessory==12.1
     # via pyobjc
-pyobjc-framework-fileprovider==11.0
+pyobjc-framework-fileprovider==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-fileproviderui
-pyobjc-framework-fileproviderui==11.0
+pyobjc-framework-fileproviderui==12.1
     # via pyobjc
-pyobjc-framework-findersync==11.0
+pyobjc-framework-findersync==12.1
     # via pyobjc
-pyobjc-framework-fsevents==11.0
+pyobjc-framework-fsevents==12.1
     # via pyobjc-framework-coreservices
-pyobjc-framework-gamecenter==11.0
+pyobjc-framework-gamecenter==12.1
     # via pyobjc
-pyobjc-framework-gamecontroller==11.0
+pyobjc-framework-gamecontroller==12.1
     # via pyobjc
-pyobjc-framework-gamekit==11.0
+pyobjc-framework-gamekit==12.1
     # via pyobjc
-pyobjc-framework-gameplaykit==11.0
+pyobjc-framework-gameplaykit==12.1
     # via pyobjc
-pyobjc-framework-healthkit==11.0
+pyobjc-framework-healthkit==12.1
     # via pyobjc
-pyobjc-framework-imagecapturecore==11.0
+pyobjc-framework-imagecapturecore==12.1
     # via pyobjc
-pyobjc-framework-installerplugins==11.0
+pyobjc-framework-installerplugins==12.1
     # via pyobjc
-pyobjc-framework-intents==11.0
+pyobjc-framework-intents==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-intentsui
-pyobjc-framework-intentsui==11.0
+pyobjc-framework-intentsui==12.1
     # via pyobjc
-pyobjc-framework-iobluetooth==11.0
+pyobjc-framework-iobluetooth==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-iobluetoothui
-pyobjc-framework-iobluetoothui==11.0
+pyobjc-framework-iobluetoothui==12.1
     # via pyobjc
-pyobjc-framework-iosurface==11.0
+pyobjc-framework-iosurface==12.1
     # via pyobjc
-pyobjc-framework-ituneslibrary==11.0
+pyobjc-framework-ituneslibrary==12.1
     # via pyobjc
-pyobjc-framework-kernelmanagement==11.0
+pyobjc-framework-kernelmanagement==12.1
     # via pyobjc
-pyobjc-framework-latentsemanticmapping==11.0
+pyobjc-framework-latentsemanticmapping==12.1
     # via pyobjc
-pyobjc-framework-launchservices==11.0
+pyobjc-framework-launchservices==12.1
     # via pyobjc
-pyobjc-framework-libdispatch==11.0
+pyobjc-framework-libdispatch==12.1
     # via pyobjc
-pyobjc-framework-libxpc==11.0
+pyobjc-framework-libxpc==12.1
     # via pyobjc
-pyobjc-framework-linkpresentation==11.0
+pyobjc-framework-linkpresentation==12.1
     # via pyobjc
-pyobjc-framework-localauthentication==11.0
+pyobjc-framework-localauthentication==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-localauthenticationembeddedui
-pyobjc-framework-localauthenticationembeddedui==11.0
+pyobjc-framework-localauthenticationembeddedui==12.1
     # via pyobjc
-pyobjc-framework-mailkit==11.0
+pyobjc-framework-mailkit==12.1
     # via pyobjc
-pyobjc-framework-mapkit==11.0
+pyobjc-framework-mapkit==12.1
     # via pyobjc
-pyobjc-framework-mediaaccessibility==11.0
+pyobjc-framework-mediaaccessibility==12.1
     # via pyobjc
-pyobjc-framework-mediaextension==11.0
+pyobjc-framework-mediaextension==12.1
     # via pyobjc
-pyobjc-framework-medialibrary==11.0
+pyobjc-framework-medialibrary==12.1
     # via pyobjc
-pyobjc-framework-mediaplayer==11.0
+pyobjc-framework-mediaplayer==12.1
     # via pyobjc
-pyobjc-framework-mediatoolbox==11.0
+pyobjc-framework-mediatoolbox==12.1
     # via pyobjc
-pyobjc-framework-metal==11.0
+pyobjc-framework-metal==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-cinematic
     #   pyobjc-framework-metalfx
     #   pyobjc-framework-metalkit
     #   pyobjc-framework-metalperformanceshaders
-pyobjc-framework-metalfx==11.0
+pyobjc-framework-metalfx==12.1
     # via pyobjc
-pyobjc-framework-metalkit==11.0
+pyobjc-framework-metalkit==12.1
     # via pyobjc
-pyobjc-framework-metalperformanceshaders==11.0
+pyobjc-framework-metalperformanceshaders==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-metalperformanceshadersgraph
-pyobjc-framework-metalperformanceshadersgraph==11.0
+pyobjc-framework-metalperformanceshadersgraph==12.1
     # via pyobjc
-pyobjc-framework-metrickit==11.0
+pyobjc-framework-metrickit==12.1
     # via pyobjc
-pyobjc-framework-mlcompute==11.0
+pyobjc-framework-mlcompute==12.1
     # via pyobjc
-pyobjc-framework-modelio==11.0
+pyobjc-framework-modelio==12.1
     # via pyobjc
-pyobjc-framework-multipeerconnectivity==11.0
+pyobjc-framework-multipeerconnectivity==12.1
     # via pyobjc
-pyobjc-framework-naturallanguage==11.0
+pyobjc-framework-naturallanguage==12.1
     # via pyobjc
-pyobjc-framework-netfs==11.0
+pyobjc-framework-netfs==12.1
     # via pyobjc
-pyobjc-framework-network==11.0
+pyobjc-framework-network==12.1
     # via pyobjc
-pyobjc-framework-networkextension==11.0
+pyobjc-framework-networkextension==12.1
     # via pyobjc
-pyobjc-framework-notificationcenter==11.0
+pyobjc-framework-notificationcenter==12.1
     # via pyobjc
-pyobjc-framework-opendirectory==11.0
+pyobjc-framework-opendirectory==12.1
     # via pyobjc
-pyobjc-framework-osakit==11.0
+pyobjc-framework-osakit==12.1
     # via pyobjc
-pyobjc-framework-oslog==11.0
+pyobjc-framework-oslog==12.1
     # via pyobjc
-pyobjc-framework-passkit==11.0
+pyobjc-framework-passkit==12.1
     # via pyobjc
-pyobjc-framework-pencilkit==11.0
+pyobjc-framework-pencilkit==12.1
     # via pyobjc
-pyobjc-framework-phase==11.0
+pyobjc-framework-phase==12.1
     # via pyobjc
-pyobjc-framework-photos==11.0
+pyobjc-framework-photos==12.1
     # via pyobjc
-pyobjc-framework-photosui==11.0
+pyobjc-framework-photosui==12.1
     # via pyobjc
-pyobjc-framework-preferencepanes==11.0
+pyobjc-framework-preferencepanes==12.1
     # via pyobjc
-pyobjc-framework-pushkit==11.0
+pyobjc-framework-pushkit==12.1
     # via pyobjc
-pyobjc-framework-quartz==11.0
+pyobjc-framework-quartz==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-accessibility
@@ -769,118 +769,118 @@ pyobjc-framework-quartz==11.0
     #   pyobjc-framework-spritekit
     #   pyobjc-framework-videotoolbox
     #   pyobjc-framework-vision
-pyobjc-framework-quicklookthumbnailing==11.0
+pyobjc-framework-quicklookthumbnailing==12.1
     # via pyobjc
-pyobjc-framework-replaykit==11.0
+pyobjc-framework-replaykit==12.1
     # via pyobjc
-pyobjc-framework-safariservices==11.0
+pyobjc-framework-safariservices==12.1
     # via pyobjc
-pyobjc-framework-safetykit==11.0
+pyobjc-framework-safetykit==12.1
     # via pyobjc
-pyobjc-framework-scenekit==11.0
+pyobjc-framework-scenekit==12.1
     # via pyobjc
-pyobjc-framework-screencapturekit==11.0
+pyobjc-framework-screencapturekit==12.1
     # via pyobjc
-pyobjc-framework-screensaver==11.0
+pyobjc-framework-screensaver==12.1
     # via pyobjc
-pyobjc-framework-screentime==11.0
+pyobjc-framework-screentime==12.1
     # via pyobjc
-pyobjc-framework-searchkit==11.0
+pyobjc-framework-searchkit==12.1
     # via pyobjc
-pyobjc-framework-security==11.0
+pyobjc-framework-security==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-localauthentication
     #   pyobjc-framework-securityfoundation
     #   pyobjc-framework-securityinterface
-pyobjc-framework-securityfoundation==11.0
+pyobjc-framework-securityfoundation==12.1
     # via pyobjc
-pyobjc-framework-securityinterface==11.0
+pyobjc-framework-securityinterface==12.1
     # via pyobjc
-pyobjc-framework-sensitivecontentanalysis==11.0
+pyobjc-framework-sensitivecontentanalysis==12.1
     # via pyobjc
-pyobjc-framework-servicemanagement==11.0
+pyobjc-framework-servicemanagement==12.1
     # via pyobjc
-pyobjc-framework-sharedwithyou==11.0
+pyobjc-framework-sharedwithyou==12.1
     # via pyobjc
-pyobjc-framework-sharedwithyoucore==11.0
+pyobjc-framework-sharedwithyoucore==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-sharedwithyou
-pyobjc-framework-shazamkit==11.0
+pyobjc-framework-shazamkit==12.1
     # via pyobjc
-pyobjc-framework-social==11.0
+pyobjc-framework-social==12.1
     # via pyobjc
-pyobjc-framework-soundanalysis==11.0
+pyobjc-framework-soundanalysis==12.1
     # via pyobjc
-pyobjc-framework-speech==11.0
+pyobjc-framework-speech==12.1
     # via pyobjc
-pyobjc-framework-spritekit==11.0
+pyobjc-framework-spritekit==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-gameplaykit
-pyobjc-framework-storekit==11.0
+pyobjc-framework-storekit==12.1
     # via pyobjc
-pyobjc-framework-symbols==11.0
+pyobjc-framework-symbols==12.1
     # via pyobjc
-pyobjc-framework-syncservices==11.0
+pyobjc-framework-syncservices==12.1
     # via pyobjc
-pyobjc-framework-systemconfiguration==11.0
+pyobjc-framework-systemconfiguration==12.1
     # via pyobjc
-pyobjc-framework-systemextensions==11.0
+pyobjc-framework-systemextensions==12.1
     # via pyobjc
-pyobjc-framework-threadnetwork==11.0
+pyobjc-framework-threadnetwork==12.1
     # via pyobjc
-pyobjc-framework-uniformtypeidentifiers==11.0
+pyobjc-framework-uniformtypeidentifiers==12.1
     # via pyobjc
-pyobjc-framework-usernotifications==11.0
+pyobjc-framework-usernotifications==12.1
     # via
     #   pyobjc
     #   pyobjc-framework-usernotificationsui
-pyobjc-framework-usernotificationsui==11.0
+pyobjc-framework-usernotificationsui==12.1
     # via pyobjc
-pyobjc-framework-videosubscriberaccount==11.0
+pyobjc-framework-videosubscriberaccount==12.1
     # via pyobjc
-pyobjc-framework-videotoolbox==11.0
+pyobjc-framework-videotoolbox==12.1
     # via pyobjc
-pyobjc-framework-virtualization==11.0
+pyobjc-framework-virtualization==12.1
     # via pyobjc
-pyobjc-framework-vision==11.0
+pyobjc-framework-vision==12.1
     # via pyobjc
-pyobjc-framework-webkit==11.0
+pyobjc-framework-webkit==12.1
     # via pyobjc
 pysbd==0.3.4
     # via open-llm-vtuber (pyproject.toml)
-python-dotenv==1.1.0
+python-dotenv==1.2.1
     # via uvicorn
 python-multipart==0.0.20
     # via fastapi
-pyttsx3==2.98
+pyttsx3==2.99
     # via open-llm-vtuber (pyproject.toml)
-pyyaml==6.0.2
+pyyaml==6.0.3
     # via
     #   open-llm-vtuber (pyproject.toml)
     #   pre-commit
     #   uvicorn
-requests==2.32.3
+requests==2.32.5
     # via open-llm-vtuber (pyproject.toml)
-rich==14.0.0
+rich==14.2.0
     # via
     #   rich-toolkit
     #   typer
-rich-toolkit==0.14.1
+rich-toolkit==0.17.0
     # via fastapi-cli
-ruamel-yaml==0.18.10
+ruamel-yaml==0.18.16
     # via open-llm-vtuber (pyproject.toml)
-ruamel-yaml-clib==0.2.12
+ruamel-yaml-clib==0.2.15
     # via ruamel-yaml
-ruff==0.11.4
+ruff==0.14.7
     # via open-llm-vtuber (pyproject.toml)
-scipy==1.15.2
+scipy==1.16.3
     # via open-llm-vtuber (pyproject.toml)
 shellingham==1.5.4
     # via typer
-sherpa-onnx==1.11.3
+sherpa-onnx==1.12.18
     # via open-llm-vtuber (pyproject.toml)
 silero-vad==5.1.2
     # via open-llm-vtuber (pyproject.toml)
@@ -896,17 +896,17 @@ soundfile==0.13.1
     # via open-llm-vtuber (pyproject.toml)
 srt==3.5.3
     # via edge-tts
-starlette==0.46.1
+starlette==0.50.0
     # via fastapi
-sympy==1.13.1
+sympy==1.14.0
     # via
     #   onnxruntime
     #   torch
 tabulate==0.9.0
     # via edge-tts
-tomli==2.2.1
+tomli==2.3.0
     # via open-llm-vtuber (pyproject.toml)
-torch==2.6.0
+torch==2.9.1
     # via
     #   open-llm-vtuber (pyproject.toml)
     #   silero-vad
@@ -917,9 +917,9 @@ tqdm==4.67.1
     # via
     #   open-llm-vtuber (pyproject.toml)
     #   openai
-typer==0.15.2
+typer==0.20.0
     # via fastapi-cli
-typing-extensions==4.13.1
+typing-extensions==4.12.2
     # via
     #   anthropic
     #   anyio
@@ -937,24 +937,24 @@ typing-extensions==4.13.1
     #   typer
     #   typing-inspection
     #   uvicorn
-typing-inspection==0.4.0
+typing-inspection==0.4.2
     # via pydantic
-urllib3==2.3.0
+urllib3==2.5.0
     # via requests
-uvicorn==0.34.0
+uvicorn==0.38.0
     # via
     #   open-llm-vtuber (pyproject.toml)
     #   fastapi
     #   fastapi-cli
-uvloop==0.21.0
+uvloop==0.22.1
     # via uvicorn
-virtualenv==20.30.0
+virtualenv==20.35.4
     # via pre-commit
-watchfiles==1.0.5
+watchfiles==1.1.1
     # via uvicorn
-websocket-client==1.8.0
+websocket-client==1.9.0
     # via open-llm-vtuber (pyproject.toml)
 websockets==15.0.1
     # via uvicorn
-yarl==1.19.0
+yarl==1.9.4
     # via aiohttp
