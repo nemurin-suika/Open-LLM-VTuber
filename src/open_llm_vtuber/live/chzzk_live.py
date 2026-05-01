@@ -220,27 +220,39 @@ class ChzzkLivePlatform:
 
     async def run(self) -> None:
         self._running = True
-        client = ChzzkChatClient(channel_id=self._channel_id)
-        self._chat_client = client
-        self._setup_events(client)
         live_chat_injector.set_restrict_callback(self._do_restrict)
         logger.info(f"Connecting to Chzzk Live channel: {self._channel_id}")
-        timer_task = asyncio.create_task(self._flush_timer_loop())
+
+        retry_delay = 5
+
         try:
-            await client.start(
-                authorization_key=self._authorization_key,
-                session_key=self._session_key,
-            )
-        except asyncio.CancelledError:
-            logger.info("Chzzk Live platform cancelled")
-        except Exception as e:
-            logger.error(f"Chzzk Live error: {e}")
-            logger.debug(traceback.format_exc())
+            while self._running:
+                client = ChzzkChatClient(channel_id=self._channel_id)
+                self._chat_client = client
+                self._setup_events(client)
+                timer_task = asyncio.create_task(self._flush_timer_loop())
+                try:
+                    await client.start(
+                        authorization_key=self._authorization_key,
+                        session_key=self._session_key,
+                    )
+                    break
+                except asyncio.CancelledError:
+                    logger.info("Chzzk Live platform cancelled")
+                    return
+                except Exception as e:
+                    logger.error(f"Chzzk Live error: {e}")
+                    logger.debug(traceback.format_exc())
+                    if self._running:
+                        logger.info(f"Reconnecting in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                finally:
+                    timer_task.cancel()
+                    try:
+                        await timer_task
+                    except asyncio.CancelledError:
+                        pass
         finally:
             self._running = False
-            timer_task.cancel()
-            try:
-                await timer_task
-            except asyncio.CancelledError:
-                pass
+            self._chat_client = None
             logger.info("Chzzk Live platform stopped")

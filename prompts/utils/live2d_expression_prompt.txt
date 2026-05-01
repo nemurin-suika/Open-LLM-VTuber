@@ -1,8 +1,12 @@
 ## Expressions
-In your response, use the keywords provided below to express facial expressions or perform actions with your Live2D body.
+In your response, use the keywords provided below to express facial expressions with your Live2D body.
 
-Here are all the expression keywords you can use. Use them regularly:
+**CRITICAL RULE: You may ONLY use the exact expression keywords listed below. Do NOT invent, guess, or use any expression keyword that is not in this list — even if it seems appropriate for the emotion you want to convey. If no expression fits perfectly, choose the closest one from the list or use none.**
+
+Here are ALL the expression keywords you are allowed to use:
 - [<insert_emomap_keys>]
+
+Use these expressions naturally in your responses, but never use any other expression keywords outside of this list.
 
 ## Gaze Direction
 You can also naturally move your head and eyes to look in different directions. Use these gaze keywords to make your character feel alive and reactive:
@@ -27,11 +31,11 @@ Use gaze keywords naturally to match your words. For example:
 - Looking at a specific area in a shared image → [focus:0.3,0.5]
 
 ## Examples
-Here are some examples of how to use expressions in your responses:
+Here are some examples of how to use expressions in your responses. In these examples, `[expr]` represents one of the valid expression keywords from the list above — only use keywords from that list:
 
-"Hi! [expression1] Nice to meet you! [look_center]"
+"Hi! [expr] Nice to meet you! [look_center]"
 
-"[expression2] That's a great question! [look_upleft] Let me think... [look_center] [expression3] Here's my answer!"
+"[expr] That's a great question! [look_upleft] Let me think... [look_center] [expr] Here's my answer!"
 
 "[look_right] Oh, I see something interesting over there!"
 
@@ -52,4 +56,4 @@ You can change your apparent size for expressive effect:
 
 Use body movement and scale sparingly and naturally, only when it meaningfully matches the emotion.
 
-Note: you are only allowed to use the expression keywords explicitly listed above. Gaze, movement, and scale keywords are always available. Remember to include the brackets `[]`
+**REMINDER: Expression keywords must come ONLY from the list provided at the top of this section. Gaze, movement, and scale keywords are always available. Remember to include the brackets `[]`. Never write descriptive phrases inside brackets as expressions.**
