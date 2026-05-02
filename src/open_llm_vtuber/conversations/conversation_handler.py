@@ -1,7 +1,7 @@
 import asyncio
 import json
 import random
-from typing import Dict, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 
 import numpy as np
 from fastapi import WebSocket
@@ -15,6 +15,43 @@ from .single_conversation import process_single_conversation
 from .conversation_utils import EMOJI_LIST
 from .types import GroupConversationState
 from prompts import prompt_loader
+
+# Per-client proactive speak state: {"count": int, "max": int}
+# count = how many times the current topic has been spoken (0 = start fresh)
+# max   = how many times to continue before switching to a new topic
+_proactive_state: Dict[str, Dict[str, int]] = {}
+
+
+def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str]]:
+    """Split file into (new_topic_variants, continue_variants) using ===CONTINUE=== separator."""
+    if "===CONTINUE===" in raw:
+        new_section, cont_section = raw.split("===CONTINUE===", 1)
+    else:
+        new_section, cont_section = raw, ""
+    new_variants = [v.strip() for v in new_section.split("---") if v.strip()]
+    cont_variants = [v.strip() for v in cont_section.split("---") if v.strip()]
+    return new_variants, cont_variants
+
+
+def _pick_proactive_variant(
+    client_uid: str,
+    new_variants: List[str],
+    cont_variants: List[str],
+) -> str:
+    """Pick new-topic or continue variant based on per-client state."""
+    state = _proactive_state.setdefault(client_uid, {"count": 0, "max": 0})
+
+    if state["count"] > 0 and state["count"] < state["max"] and cont_variants:
+        chosen = random.choice(cont_variants)
+        state["count"] += 1
+        logger.debug(f"Proactive speak: continuing topic ({state['count']}/{state['max']})")
+    else:
+        chosen = random.choice(new_variants) if new_variants else "뭔가 자연스럽게 혼잣말을 해줘."
+        state["max"] = random.randint(1, 3)
+        state["count"] = 1
+        logger.debug(f"Proactive speak: new topic (will continue up to {state['max']} times)")
+
+    return chosen
 
 
 async def handle_conversation_trigger(
@@ -39,11 +76,12 @@ async def handle_conversation_trigger(
             prompt_file = context.system_config.tool_prompts.get(prompt_name)
             if prompt_file:
                 raw = prompt_loader.load_util(prompt_file)
-                variants = [v.strip() for v in raw.split("---") if v.strip()]
-                chosen = random.choice(variants) if variants else raw.strip()
+                new_variants, cont_variants = _parse_proactive_prompt(raw)
             else:
                 logger.warning("Proactive speak prompt not configured, using default")
-                chosen = "뭔가 자연스럽게 혼잣말을 해줘."
+                new_variants = ["뭔가 자연스럽게 혼잣말을 해줘."]
+                cont_variants = []
+            chosen = _pick_proactive_variant(client_uid, new_variants, cont_variants)
             user_input = f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
         except Exception as e:
             logger.error(f"Error loading proactive speak prompt: {e}")
