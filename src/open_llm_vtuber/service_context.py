@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 from typing import Callable
 from loguru import logger
 from fastapi import WebSocket
@@ -411,6 +412,17 @@ class ServiceContext:
             # Save the current configuration
             self.character_config.agent_config = agent_config
             self.system_prompt = system_prompt
+
+            # Save final prompt to file
+            os.makedirs("logs", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prompt_log_path = f"logs/prompt_{timestamp}.txt"
+            full_prompt = system_prompt
+            if self.mcp_prompt:
+                full_prompt += f"\n\n--- MCP Prompt ---\n{self.mcp_prompt}"
+            with open(prompt_log_path, "w", encoding="utf-8") as f:
+                f.write(full_prompt)
+            logger.info(f"Final prompt saved to {prompt_log_path}")
 
         except Exception as e:
             logger.error(f"Failed to initialize agent: {e}")
