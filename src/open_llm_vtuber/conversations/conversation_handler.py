@@ -95,50 +95,61 @@ async def handle_conversation_trigger(
     received_data_buffers: Dict[str, np.ndarray],
     current_conversation_tasks: Dict[str, Optional[asyncio.Task]],
     broadcast_to_group: Callable,
+    initial_metadata: Optional[Dict] = None,
 ) -> None:
     """Handle triggers that start a conversation"""
-    metadata = None
+    metadata = dict(initial_metadata) if initial_metadata else None
 
     if msg_type == "ai-speak-signal":
+        _has_pending = False
         try:
-            prompt_name = "proactive_speak_prompt"
-            prompt_file = context.system_config.tool_prompts.get(prompt_name)
-            if prompt_file:
-                raw = prompt_loader.load_util(prompt_file)
-                viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
-            else:
-                logger.warning("Proactive speak prompt not configured, using default")
-                viewer_variants, solo_variants, cont_variants = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
-            chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
+            from ..live.live_chat_injector import has_pending_chats
+            _has_pending = has_pending_chats()
+        except Exception:
+            pass
 
+        if _has_pending:
+            logger.debug("Proactive speak: flushing pending viewer chats instead")
+            user_input = ""
+            metadata = {"from_live": True}
+        else:
             try:
-                from ..live.live_chat_injector import get_viewer_count
-                vc = get_viewer_count()
-                vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
-            except Exception:
-                vc_line = ""
+                prompt_name = "proactive_speak_prompt"
+                prompt_file = context.system_config.tool_prompts.get(prompt_name)
+                if prompt_file:
+                    raw = prompt_loader.load_util(prompt_file)
+                    viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
+                else:
+                    logger.warning("Proactive speak prompt not configured, using default")
+                    viewer_variants, solo_variants, cont_variants = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
+                chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
 
-            user_input = f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
-        except Exception as e:
-            logger.error(f"Error loading proactive speak prompt: {e}")
-            user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
+                try:
+                    from ..live.live_chat_injector import get_viewer_count
+                    vc = get_viewer_count()
+                    vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
+                except Exception:
+                    vc_line = ""
 
-        # Add metadata to indicate this is a proactive speak request
-        # that should be skipped in both memory and history
-        metadata = {
-            "proactive_speak": True,
-            "skip_memory": True,  # Skip storing in AI's internal memory
-            "skip_history": True,  # Skip storing in local conversation history
-        }
+                user_input = f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
+            except Exception as e:
+                logger.error(f"Error loading proactive speak prompt: {e}")
+                user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
 
-        await websocket.send_text(
-            json.dumps(
-                {
-                    "type": "full-text",
-                    "text": "AI wants to speak something...",
-                }
+            metadata = {
+                "proactive_speak": True,
+                "skip_memory": True,
+                "skip_history": True,
+            }
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "full-text",
+                        "text": "AI wants to speak something...",
+                    }
+                )
             )
-        )
     elif msg_type == "text-input":
         user_input = data.get("text", "")
     else:  # mic-audio-end

@@ -31,10 +31,6 @@ class ChzzkLiveConfig(I18nMixin):
     handle_donation: bool = Field(True, alias="handle_donation")
     handle_mission: bool = Field(True, alias="handle_mission")
     handle_subscription: bool = Field(True, alias="handle_subscription")
-    buffer_chat: bool = Field(True, alias="buffer_chat")
-    chat_timeout: int = Field(30, alias="chat_timeout")
-    max_chat_buffer_size: int = Field(50, alias="max_chat_buffer_size")
-    chat_batch_header: str = Field("[시청자 채팅]", alias="chat_batch_header")
     chat_format: str = Field("[채팅] {username}: {message}", alias="chat_format")
     donation_format: str = Field(
         "[후원] {username}님이 {amount}원 후원: {message}", alias="donation_format"
@@ -45,7 +41,6 @@ class ChzzkLiveConfig(I18nMixin):
     subscription_format: str = Field(
         "[구독] {username}님이 {month}개월째 구독 중!", alias="subscription_format"
     )
-    proxy_url: str = Field("ws://localhost:12393/proxy-ws", alias="proxy_url")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "channel_id": Description(
@@ -76,22 +71,6 @@ class ChzzkLiveConfig(I18nMixin):
             en="Whether to forward subscription events to VTuber",
             zh="是否将订阅事件转发给VTuber",
         ),
-        "buffer_chat": Description(
-            en="Buffer chats and flush periodically or when user speaks",
-            zh="缓冲聊天消息，定期或用户发言时发送",
-        ),
-        "chat_timeout": Description(
-            en="Seconds between periodic chat buffer flushes",
-            zh="定期刷新聊天缓冲区的间隔秒数",
-        ),
-        "max_chat_buffer_size": Description(
-            en="Force-flush buffer when this many chats accumulate (overflow safety)",
-            zh="缓冲消息达到此数量时强制刷新（溢出保护）",
-        ),
-        "chat_batch_header": Description(
-            en="Header prepended to the buffered chat batch message",
-            zh="缓冲聊天批量消息的标题",
-        ),
         "chat_format": Description(
             en="Format for chat messages. Variables: {username}, {message}",
             zh="聊天消息格式。变量：{username}, {message}",
@@ -107,10 +86,6 @@ class ChzzkLiveConfig(I18nMixin):
         "subscription_format": Description(
             en="Format for subscription messages. Variables: {username}, {month}",
             zh="订阅消息格式。变量：{username}, {month}",
-        ),
-        "proxy_url": Description(
-            en="WebSocket proxy URL for the VTuber server",
-            zh="VTuber服务器的WebSocket代理URL",
         ),
     }
 

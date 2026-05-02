@@ -357,6 +357,7 @@ class WebSocketHandler:
             received_data_buffers=self.received_data_buffers,
             current_conversation_tasks=self.current_conversation_tasks,
             broadcast_to_group=self.broadcast_to_group,
+            initial_metadata={"from_live": True},
         )
 
     async def start_live_event_loop(self) -> None:

@@ -52,7 +52,6 @@ class ChzzkLivePlatform:
         handle_donation: bool = True,
         handle_mission: bool = True,
         handle_subscription: bool = True,
-        chat_timeout: int = 30,
         chat_format: str = "[채팅] {username}: {message}",
         donation_format: str = "[후원] {username}님이 {amount}원 후원: {message}",
         mission_format: str = "[미션] {username}님의 미션 ({amount}원): {mission}",
@@ -71,7 +70,6 @@ class ChzzkLivePlatform:
         self._handle_donation = handle_donation
         self._handle_mission = handle_mission
         self._handle_subscription = handle_subscription
-        self._chat_timeout = chat_timeout
         self._chat_format = chat_format
         self._donation_format = donation_format
         self._mission_format = mission_format
@@ -102,7 +100,8 @@ class ChzzkLivePlatform:
                     user_id = getattr(message, "user_id", None) or ""
                     logger.info(f"[Chzzk Chat] {username}: {content}")
                     live_chat_injector.register_user(username, user_id)
-                    live_chat_injector.add_chat(username, content)
+                    text = self._chat_format.format(username=username, message=content)
+                    await live_chat_injector.put_immediate(text)
                 except Exception as e:
                     logger.error(f"Error handling chat: {e}")
 
@@ -146,7 +145,7 @@ class ChzzkLivePlatform:
                     else:
                         return
 
-                    await self._flush_with_event(event_text)
+                    await live_chat_injector.put_immediate(event_text)
                 except Exception as e:
                     logger.error(f"Error handling donation: {e}")
 
@@ -162,7 +161,7 @@ class ChzzkLivePlatform:
                     event_text = self._subscription_format.format(
                         username=username, month=month
                     )
-                    await self._flush_with_event(event_text)
+                    await live_chat_injector.put_immediate(event_text)
                 except Exception as e:
                     logger.error(f"Error handling subscription: {e}")
 
@@ -174,34 +173,17 @@ class ChzzkLivePlatform:
         async def on_client_error(error, *args):
             logger.error(f"Chzzk Live error: {error}")
 
-    async def _flush_with_event(self, event_text: str) -> None:
-        """Consume pending chats and combine with an immediate event, then enqueue."""
-        pending = live_chat_injector.consume_pending_chats()
-        combined = f"{pending}\n\n{event_text}" if pending else event_text
-        await live_chat_injector.put_immediate(combined)
-
-    # ──────────────────────────────────────────────
-    # Timer
-    # ──────────────────────────────────────────────
-
-    async def _flush_timer_loop(self) -> None:
-        logger.info(f"Chat flush timer started (interval: {self._chat_timeout}s)")
-        while self._running:
-            await asyncio.sleep(self._chat_timeout)
-            pending = live_chat_injector.consume_pending_chats()
-            if pending:
-                logger.info(f"[Chzzk Timer Flush]\n{pending.split(chr(10), 1)[-1]}")
-                await live_chat_injector.put_immediate(pending)
-
     async def _viewer_count_poll_loop(self) -> None:
         from chzzkpy import Client as ChzzkHttpClient
         logger.info("Viewer count polling started (interval: 60s)")
         while self._running:
             try:
-                async with ChzzkHttpClient(
-                    authorization_key=self._authorization_key,
-                    session_key=self._session_key,
-                ) as client:
+                client_kwargs = {}
+                if self._authorization_key:
+                    client_kwargs["authorization_key"] = self._authorization_key
+                if self._session_key:
+                    client_kwargs["session_key"] = self._session_key
+                async with ChzzkHttpClient(**client_kwargs) as client:
                     status = await client.live_status(self._channel_id)
                     count = status.concurrent_user_count if status else 0
                     live_chat_injector.set_viewer_count(count)
@@ -247,7 +229,6 @@ class ChzzkLivePlatform:
                 client = ChzzkChatClient(channel_id=self._channel_id)
                 self._chat_client = client
                 self._setup_events(client)
-                timer_task = asyncio.create_task(self._flush_timer_loop())
                 viewer_poll_task = asyncio.create_task(self._viewer_count_poll_loop())
                 try:
                     await client.start(
@@ -265,12 +246,7 @@ class ChzzkLivePlatform:
                         logger.info(f"Reconnecting in {retry_delay}s...")
                         await asyncio.sleep(retry_delay)
                 finally:
-                    timer_task.cancel()
                     viewer_poll_task.cancel()
-                    try:
-                        await timer_task
-                    except asyncio.CancelledError:
-                        pass
                     try:
                         await viewer_poll_task
                     except asyncio.CancelledError:

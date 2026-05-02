@@ -129,6 +129,7 @@ class AgentFactory:
                 segment_method=settings.get("segment_method"),
                 host=settings.get("host"),
                 port=settings.get("port"),
+                context_window_limit=settings.get("context_window_limit"),
             )
 
         else:

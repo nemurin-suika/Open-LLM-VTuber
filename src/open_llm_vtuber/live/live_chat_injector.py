@@ -1,30 +1,21 @@
 """
 Module-level shared state that bridges the live platform (chzzk_live) with
-the conversation pipeline (single_conversation).
+the conversation pipeline.
 
-Two channels:
-- pending_chats: accumulated viewer chat messages, consumed and appended to
-  user input at the start of each process_single_conversation call.
-- immediate_queue: asyncio.Queue of high-priority texts (donations,
-  subscriptions, timer-triggered chat batches) that trigger standalone
-  process_single_conversation calls via the WebSocketHandler.
-
-Moderation:
-- user_registry: nickname → user_id_hash mapping, populated from chat events.
+- immediate_queue: every live event (chat, donation, subscription) is enqueued
+  here and triggers a standalone process_single_conversation call via the
+  WebSocketHandler's background loop.
+- user_registry: nickname → user_id_hash, populated on every incoming chat,
+  used for moderation (temporary chat restriction).
 - restrict_callback: async callable set by ChzzkLivePlatform; called when
   the LLM includes [채팅제한 username] in its response.
 """
 
 import asyncio
-from typing import Callable, Awaitable, Dict, List, Optional, Tuple
-
-# Buffered chat messages: (username, message)
-_pending_chats: List[Tuple[str, str]] = []
+from typing import Callable, Awaitable, Dict, Optional
 
 # Lazy-initialized to avoid "no running event loop" errors at import time
 _immediate_queue: Optional[asyncio.Queue] = None
-
-_header: str = "[시청자 채팅]"
 
 # nickname → user_id_hash (filled on every incoming chat)
 _user_registry: Dict[str, str] = {}
@@ -34,33 +25,6 @@ _restrict_callback: Optional[Callable[[str], Awaitable[bool]]] = None
 
 # Real-time viewer count: -1 = unknown, 0+ = actual count from platform API
 _viewer_count: int = -1
-
-
-# ── Configuration ──────────────────────────────────────────────────────────
-
-def configure(header: str = "[시청자 채팅]") -> None:
-    global _header
-    _header = header
-
-
-# ── Chat buffer ─────────────────────────────────────────────────────────────
-
-def add_chat(username: str, message: str) -> None:
-    """Buffer a single viewer chat. Called from the chzzk on_chat event."""
-    _pending_chats.append((username, message))
-
-
-def consume_pending_chats() -> Optional[str]:
-    """
-    Return all buffered chats as a formatted string and clear the buffer.
-    Returns None if the buffer is empty.
-    Called from process_single_conversation before the LLM call.
-    """
-    if not _pending_chats:
-        return None
-    lines = "\n".join(f"{u}: {m}" for u, m in _pending_chats)
-    _pending_chats.clear()
-    return f"{_header}\n{lines}"
 
 
 # ── Immediate-event queue ───────────────────────────────────────────────────
@@ -74,7 +38,7 @@ def get_immediate_queue() -> asyncio.Queue:
 
 
 async def put_immediate(text: str) -> None:
-    """Enqueue a high-priority event text for standalone conversation processing."""
+    """Enqueue an event text to trigger a standalone conversation turn."""
     await get_immediate_queue().put(text)
 
 
@@ -109,7 +73,7 @@ async def execute_restrict(nickname: str) -> bool:
 # ── Viewer count ─────────────────────────────────────────────────────────────
 
 def set_viewer_count(count: int) -> None:
-    """Update the real-time viewer count. Called from the platform polling loop."""
+    """Update the real-time viewer count."""
     global _viewer_count
     _viewer_count = count
 

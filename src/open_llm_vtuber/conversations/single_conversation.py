@@ -51,12 +51,9 @@ async def process_single_conversation(
     Returns:
         str: Complete response text
     """
-    _IGNORE_TOKEN = "[IGNORE]"
-
     # Create TTSTaskManager for this conversation
     tts_manager = TTSTaskManager()
     full_response = ""  # Initialize full_response here
-    is_voice_ignored = False  # LLM이 호출 대상이 아님을 판단한 경우
 
     try:
         # Send initial signals
@@ -76,21 +73,10 @@ async def process_single_conversation(
 
         # Wrap nemurin's direct input so it's distinguishable from viewer chats
         is_proactive = metadata and metadata.get("proactive_speak", False)
-        if input_text and not is_proactive:
+        is_from_live = metadata and metadata.get("from_live", False)
+        if input_text and not is_proactive and not is_from_live:
             _human = context.character_config.human_name
             input_text = f"[{_human}]\n{input_text}\n[/{_human}]"
-
-        # Inject any pending live-platform chats (chzzk, etc.) accumulated since
-        # the last conversation turn. consume_pending_chats() clears the buffer,
-        # so chats are included exactly once regardless of how many turns fire.
-        try:
-            from ..live.live_chat_injector import consume_pending_chats as _consume_live_chats
-            _live_chats = _consume_live_chats()
-            if _live_chats:
-                input_text = f"{input_text}\n\n{_live_chats}" if input_text else _live_chats
-                logger.info(f"Injected live chats into user input")
-        except Exception:
-            pass
 
         # Inject real-time viewer count when the stream is live (count > 0)
         try:
@@ -139,21 +125,6 @@ async def process_single_conversation(
                     if not _llm_first_output:
                         _llm_first_output = True
                         logger.info(f"[PERF] LLM first output: {time.perf_counter() - t_llm_start:.3f}s")
-
-                    # 첫 출력에서 [IGNORE] 감지 시 TTS 없이 무시 처리
-                    if (
-                        not full_response
-                        and isinstance(output_item, SentenceOutput)
-                        and output_item.tts_text.strip() == _IGNORE_TOKEN
-                    ):
-                        is_voice_ignored = True
-                        logger.info(
-                            f"Voice input ignored by LLM (not addressed): '{input_text}'"
-                        )
-                        await websocket_send(
-                            json.dumps({"type": "control", "text": "speech-ignored"})
-                        )
-                        break
 
                     # [채팅제한 username] 패턴 감지 및 처리
                     if isinstance(output_item, SentenceOutput):
@@ -210,8 +181,8 @@ async def process_single_conversation(
             # full_response will contain partial response before error
         # --- End processing agent response ---
 
-        # Wait for any pending TTS tasks (무시된 경우 건너뜀)
-        if not is_voice_ignored and tts_manager.task_list:
+        # Wait for any pending TTS tasks
+        if tts_manager.task_list:
             t_tts_gather_start = time.perf_counter()
             await asyncio.gather(*tts_manager.task_list)
             logger.info(f"[PERF] All TTS tasks done: {time.perf_counter() - t_tts_gather_start:.3f}s")
@@ -223,11 +194,9 @@ async def process_single_conversation(
             client_uid=client_uid,
         )
 
-        if not is_voice_ignored:
-            logger.info(f"[PERF] Total conversation: {time.perf_counter() - t_total_start:.3f}s")
+        logger.info(f"[PERF] Total conversation: {time.perf_counter() - t_total_start:.3f}s")
 
-        # 무시된 경우 히스토리에 저장하지 않음
-        if not is_voice_ignored and not skip_history and context.history_uid:
+        if not skip_history and context.history_uid:
             if input_text:
                 store_message(
                     conf_uid=context.character_config.conf_uid,

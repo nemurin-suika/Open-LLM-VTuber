@@ -26,6 +26,7 @@ def _select_or_create_agent(
     system_prompt: str,
     model: str,
     embedding: str,
+    context_window_limit: Optional[int] = None,
 ) -> str:
     """
     Connect to the Letta server, list existing agents for interactive selection,
@@ -48,7 +49,7 @@ def _select_or_create_agent(
 
     if not agents:
         print("  등록된 에이전트가 없습니다. 새 에이전트를 생성합니다...")
-        agent_id = _create_new_agent(sync_client, system_prompt, model, embedding)
+        agent_id = _create_new_agent(sync_client, system_prompt, model, embedding, context_window_limit)
         # New agent is already created with current settings — no update needed.
         return agent_id
 
@@ -63,13 +64,13 @@ def _select_or_create_agent(
         try:
             choice = int(input("  에이전트 번호를 선택하세요: ").strip())
             if choice == 0:
-                agent_id = _create_new_agent(sync_client, system_prompt, model, embedding)
+                agent_id = _create_new_agent(sync_client, system_prompt, model, embedding, context_window_limit)
                 return agent_id
             if 1 <= choice <= len(agents):
                 selected = agents[choice - 1]
                 print(f"  선택됨: {selected.id}  ({selected.name})")
                 print(_SEP + "\n")
-                _confirm_and_update(sync_client, selected.id, system_prompt, model, embedding)
+                _confirm_and_update(sync_client, selected.id, system_prompt, model, embedding, context_window_limit)
                 return selected.id
             print(f"  0 ~ {len(agents)} 사이의 번호를 입력하세요.")
         except ValueError:
@@ -82,6 +83,7 @@ def _confirm_and_update(
     system_prompt: str,
     model: str,
     embedding: str,
+    context_window_limit: Optional[int] = None,
 ) -> None:
     """Show the pending update and ask the user whether to apply it."""
     total_len = len(system_prompt)
@@ -95,6 +97,8 @@ def _confirm_and_update(
     print(_SEP)
     print(f"  모델:        {model}")
     print(f"  임베딩:      {embedding}")
+    if context_window_limit:
+        print(f"  컨텍스트 윈도우 제한: {context_window_limit}")
     print(f"  프롬프트 길이: {total_len}자")
     print(f"  [앞부분] {head}...")
     if tail:
@@ -105,12 +109,21 @@ def _confirm_and_update(
     while True:
         answer = input("  이 설정으로 에이전트를 업데이트하시겠습니까? [y/N]: ").strip().lower()
         if answer in ("y", "yes"):
-            sync_client.agents.update(
-                agent_id,
-                system=system_prompt,
-                model=model,
-                embedding=embedding,
-            )
+            if context_window_limit is not None:
+                sync_client.agents.update(
+                    agent_id,
+                    system=system_prompt,
+                    model=model,
+                    embedding=embedding,
+                    context_window_limit=context_window_limit,
+                )
+            else:
+                sync_client.agents.update(
+                    agent_id,
+                    system=system_prompt,
+                    model=model,
+                    embedding=embedding,
+                )
             logger.info(f"에이전트 {agent_id} 업데이트 완료.")
             print(f"  업데이트 완료.\n{_SEP}\n")
             return
@@ -125,14 +138,24 @@ def _create_new_agent(
     system_prompt: str,
     model: str,
     embedding: str,
+    context_window_limit: Optional[int] = None,
 ) -> str:
     """Create a new agent and return its ID."""
-    agent = sync_client.agents.create(
-        model=model,
-        embedding=embedding,
-        system=system_prompt,
-        name="Open-LLM-VTuber",
-    )
+    if context_window_limit is not None:
+        agent = sync_client.agents.create(
+            model=model,
+            embedding=embedding,
+            system=system_prompt,
+            name="Open-LLM-VTuber",
+            context_window_limit=context_window_limit,
+        )
+    else:
+        agent = sync_client.agents.create(
+            model=model,
+            embedding=embedding,
+            system=system_prompt,
+            name="Open-LLM-VTuber",
+        )
     logger.info(f"새 Letta 에이전트 생성 완료: {agent.id}")
     print(f"  새 에이전트 생성 완료: {agent.id}")
     print(_SEP + "\n")
@@ -161,12 +184,13 @@ class LettaAgent(AgentInterface):
         segment_method: str = "pysbd",
         host: str = "localhost",
         port: int = 8283,
+        context_window_limit: Optional[int] = None,
     ):
         super().__init__()
         self.url = f"http://{host}:{port}"
 
         if not id:
-            id = _select_or_create_agent(self.url, system_prompt, model, embedding)
+            id = _select_or_create_agent(self.url, system_prompt, model, embedding, context_window_limit)
 
         self.client = AsyncLetta(base_url=self.url)
         self.id = id

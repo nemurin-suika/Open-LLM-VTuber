@@ -158,6 +158,7 @@ class LettaConfig(I18nMixin, BaseModel):
     segment_method: Literal["regex", "pysbd"] = Field("pysbd", alias="segment_method")
     model: Optional[str] = Field("google_ai/gemini-2.5-flash", alias="model")
     embedding: Optional[str] = Field("google_ai/gemini-embedding-2", alias="embedding")
+    context_window_limit: Optional[int] = Field(None, alias="context_window_limit")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "host": Description(

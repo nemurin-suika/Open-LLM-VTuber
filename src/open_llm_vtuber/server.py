@@ -89,12 +89,8 @@ class WebSocketServer:
         async def lifespan(app: FastAPI):
             tasks = []
 
-            # Configure the live chat injector header
-            from .live.live_chat_injector import configure as _cfg_injector
-            _cfg_injector(header=chzzk_cfg.chat_batch_header)
-
             # Start the background loop that turns immediate live events into
-            # conversation turns (donations, subscriptions, timer-flushed batches)
+            # conversation turns (chats, donations, subscriptions)
             tasks.append(asyncio.create_task(ws_handler.start_live_event_loop()))
 
             # Start Chzzk live platform if a channel is configured
@@ -109,7 +105,7 @@ class WebSocketServer:
                         handle_donation=chzzk_cfg.handle_donation,
                         handle_mission=chzzk_cfg.handle_mission,
                         handle_subscription=chzzk_cfg.handle_subscription,
-                        chat_timeout=chzzk_cfg.chat_timeout,
+                        chat_format=chzzk_cfg.chat_format,
                         donation_format=chzzk_cfg.donation_format,
                         mission_format=chzzk_cfg.mission_format,
                         subscription_format=chzzk_cfg.subscription_format,
