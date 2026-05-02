@@ -193,6 +193,23 @@ class ChzzkLivePlatform:
                 logger.info(f"[Chzzk Timer Flush]\n{pending.split(chr(10), 1)[-1]}")
                 await live_chat_injector.put_immediate(pending)
 
+    async def _viewer_count_poll_loop(self) -> None:
+        from chzzkpy import Client as ChzzkHttpClient
+        logger.info("Viewer count polling started (interval: 60s)")
+        while self._running:
+            try:
+                async with ChzzkHttpClient(
+                    authorization_key=self._authorization_key,
+                    session_key=self._session_key,
+                ) as client:
+                    status = await client.live_status(self._channel_id)
+                    count = status.concurrent_user_count if status else 0
+                    live_chat_injector.set_viewer_count(count)
+                    logger.debug(f"[Chzzk] Viewer count updated: {count}")
+            except Exception as e:
+                logger.warning(f"[Chzzk] Viewer count poll failed: {e}")
+            await asyncio.sleep(60)
+
     # ──────────────────────────────────────────────
     # Moderation
     # ──────────────────────────────────────────────
@@ -231,6 +248,7 @@ class ChzzkLivePlatform:
                 self._chat_client = client
                 self._setup_events(client)
                 timer_task = asyncio.create_task(self._flush_timer_loop())
+                viewer_poll_task = asyncio.create_task(self._viewer_count_poll_loop())
                 try:
                     await client.start(
                         authorization_key=self._authorization_key,
@@ -248,8 +266,13 @@ class ChzzkLivePlatform:
                         await asyncio.sleep(retry_delay)
                 finally:
                     timer_task.cancel()
+                    viewer_poll_task.cancel()
                     try:
                         await timer_task
+                    except asyncio.CancelledError:
+                        pass
+                    try:
+                        await viewer_poll_task
                     except asyncio.CancelledError:
                         pass
         finally:

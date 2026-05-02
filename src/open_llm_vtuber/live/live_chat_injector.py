@@ -32,6 +32,9 @@ _user_registry: Dict[str, str] = {}
 # Async callable(nickname: str) -> bool, set by ChzzkLivePlatform.run()
 _restrict_callback: Optional[Callable[[str], Awaitable[bool]]] = None
 
+# Real-time viewer count: -1 = unknown, 0+ = actual count from platform API
+_viewer_count: int = -1
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -101,3 +104,16 @@ async def execute_restrict(nickname: str) -> bool:
     if _restrict_callback:
         return await _restrict_callback(nickname)
     return False
+
+
+# ── Viewer count ─────────────────────────────────────────────────────────────
+
+def set_viewer_count(count: int) -> None:
+    """Update the real-time viewer count. Called from the platform polling loop."""
+    global _viewer_count
+    _viewer_count = count
+
+
+def get_viewer_count() -> int:
+    """Return the last known viewer count. -1 means not yet fetched."""
+    return _viewer_count

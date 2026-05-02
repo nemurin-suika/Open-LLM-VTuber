@@ -22,23 +22,40 @@ from prompts import prompt_loader
 _proactive_state: Dict[str, Dict[str, int]] = {}
 
 
-def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str]]:
-    """Split file into (new_topic_variants, continue_variants) using ===CONTINUE=== separator."""
+def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str], List[str]]:
+    """Split file into (viewer_variants, solo_variants, continue_variants).
+
+    File format:
+      viewer variant 1 --- viewer variant 2
+      ===SOLO===
+      solo variant 1 --- solo variant 2
+      ===CONTINUE===
+      continue variant 1 --- continue variant 2
+    """
+    cont_section = ""
     if "===CONTINUE===" in raw:
-        new_section, cont_section = raw.split("===CONTINUE===", 1)
+        main_part, cont_section = raw.split("===CONTINUE===", 1)
     else:
-        new_section, cont_section = raw, ""
-    new_variants = [v.strip() for v in new_section.split("---") if v.strip()]
-    cont_variants = [v.strip() for v in cont_section.split("---") if v.strip()]
-    return new_variants, cont_variants
+        main_part = raw
+
+    if "===SOLO===" in main_part:
+        viewer_part, solo_part = main_part.split("===SOLO===", 1)
+    else:
+        viewer_part, solo_part = "", main_part
+
+    viewer = [v.strip() for v in viewer_part.split("---") if v.strip()]
+    solo = [v.strip() for v in solo_part.split("---") if v.strip()]
+    cont = [v.strip() for v in cont_section.split("---") if v.strip()]
+    return viewer, solo, cont
 
 
 def _pick_proactive_variant(
     client_uid: str,
-    new_variants: List[str],
+    viewer_variants: List[str],
+    solo_variants: List[str],
     cont_variants: List[str],
 ) -> str:
-    """Pick new-topic or continue variant based on per-client state."""
+    """Pick new-topic or continue variant based on per-client state and viewer count."""
     state = _proactive_state.setdefault(client_uid, {"count": 0, "max": 0})
 
     if state["count"] > 0 and state["count"] < state["max"] and cont_variants:
@@ -46,10 +63,22 @@ def _pick_proactive_variant(
         state["count"] += 1
         logger.debug(f"Proactive speak: continuing topic ({state['count']}/{state['max']})")
     else:
-        chosen = random.choice(new_variants) if new_variants else "뭔가 자연스럽게 혼잣말을 해줘."
+        try:
+            from ..live.live_chat_injector import get_viewer_count
+            vc = get_viewer_count()
+        except Exception:
+            vc = -1
+
+        # Only use viewer-targeting prompts when 10+ viewers are watching
+        if vc >= 10 and viewer_variants:
+            new_pool = viewer_variants + solo_variants
+        else:
+            new_pool = solo_variants if solo_variants else viewer_variants
+
+        chosen = random.choice(new_pool) if new_pool else "뭔가 자연스럽게 혼잣말을 해줘."
         state["max"] = random.randint(1, 3)
         state["count"] = 1
-        logger.debug(f"Proactive speak: new topic (will continue up to {state['max']} times)")
+        logger.debug(f"Proactive speak: new topic, viewer_count={vc} (will continue up to {state['max']} times)")
 
     return chosen
 
@@ -76,13 +105,20 @@ async def handle_conversation_trigger(
             prompt_file = context.system_config.tool_prompts.get(prompt_name)
             if prompt_file:
                 raw = prompt_loader.load_util(prompt_file)
-                new_variants, cont_variants = _parse_proactive_prompt(raw)
+                viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
             else:
                 logger.warning("Proactive speak prompt not configured, using default")
-                new_variants = ["뭔가 자연스럽게 혼잣말을 해줘."]
-                cont_variants = []
-            chosen = _pick_proactive_variant(client_uid, new_variants, cont_variants)
-            user_input = f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
+                viewer_variants, solo_variants, cont_variants = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
+            chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
+
+            try:
+                from ..live.live_chat_injector import get_viewer_count
+                vc = get_viewer_count()
+                vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
+            except Exception:
+                vc_line = ""
+
+            user_input = f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
         except Exception as e:
             logger.error(f"Error loading proactive speak prompt: {e}")
             user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"

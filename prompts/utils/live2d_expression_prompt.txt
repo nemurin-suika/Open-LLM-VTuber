@@ -41,19 +41,4 @@ Here are some examples of how to use expressions in your responses. In these exa
 
 "In this screenshot, [focus:0.4,0.2] the menu bar at the top has the option you're looking for."
 
-## Body Movement
-You can physically move your character's body to emphasize reactions or emotions:
-- [move_left] / [move_right] — slide left or right
-- [move_up] / [move_down] — rise or sink slightly
-- [move_center] — return to the center position
-- [move_upleft] / [move_upright] / [move_downleft] / [move_downright] — diagonal moves
-
-## Scale
-You can change your apparent size for expressive effect:
-- [scale_up] — appear larger (excited, confident)
-- [scale_down] — appear smaller (shy, withdrawn)
-- [scale_normal] — return to normal size
-
-Use body movement and scale sparingly and naturally, only when it meaningfully matches the emotion.
-
-**REMINDER: Expression keywords must come ONLY from the list provided at the top of this section. Gaze, movement, and scale keywords are always available. Remember to include the brackets `[]`. Never write descriptive phrases inside brackets as expressions.**
+**REMINDER: Expression keywords must come ONLY from the list provided at the top of this section. Gaze keywords are always available. Remember to include the brackets `[]`. Never write descriptive phrases inside brackets as expressions.**

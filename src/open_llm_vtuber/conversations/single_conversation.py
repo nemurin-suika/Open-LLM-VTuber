@@ -74,6 +74,12 @@ async def process_single_conversation(
         if isinstance(user_input, np.ndarray):
             logger.info(f"[PERF] ASR total: {t_asr_end - t_asr_start:.3f}s")
 
+        # Wrap nemurin's direct input so it's distinguishable from viewer chats
+        is_proactive = metadata and metadata.get("proactive_speak", False)
+        if input_text and not is_proactive:
+            _human = context.character_config.human_name
+            input_text = f"[{_human}]\n{input_text}\n[/{_human}]"
+
         # Inject any pending live-platform chats (chzzk, etc.) accumulated since
         # the last conversation turn. consume_pending_chats() clears the buffer,
         # so chats are included exactly once regardless of how many turns fire.
@@ -83,6 +89,16 @@ async def process_single_conversation(
             if _live_chats:
                 input_text = f"{input_text}\n\n{_live_chats}" if input_text else _live_chats
                 logger.info(f"Injected live chats into user input")
+        except Exception:
+            pass
+
+        # Inject real-time viewer count when the stream is live (count > 0)
+        try:
+            from ..live.live_chat_injector import get_viewer_count as _get_viewer_count
+            _vc = _get_viewer_count()
+            if _vc > 0:
+                _vc_line = f"[실시간 시청자: {_vc}명]"
+                input_text = f"{_vc_line}\n{input_text}" if input_text else _vc_line
         except Exception:
             pass
 
