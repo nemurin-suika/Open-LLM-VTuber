@@ -17,6 +17,9 @@ from typing import Callable, Awaitable, Dict, Optional
 # Lazy-initialized to avoid "no running event loop" errors at import time
 _immediate_queue: Optional[asyncio.Queue] = None
 
+# High-priority queue for donations and subscriptions
+_priority_queue: Optional[asyncio.Queue] = None
+
 # nickname → user_id_hash (filled on every incoming chat)
 _user_registry: Dict[str, str] = {}
 
@@ -37,9 +40,36 @@ def get_immediate_queue() -> asyncio.Queue:
     return _immediate_queue
 
 
-async def put_immediate(text: str) -> None:
-    """Enqueue an event text to trigger a standalone conversation turn."""
-    await get_immediate_queue().put(text)
+async def put_immediate(item) -> None:
+    """Enqueue a regular event (chat, user input) for conversation processing.
+
+    item can be:
+    - str: treated as a live platform event (from_live=True)
+    - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
+    """
+    if isinstance(item, str):
+        item = {"user_input": item, "images": None, "metadata": {"from_live": True}}
+    await get_immediate_queue().put(item)
+
+
+def get_priority_queue() -> asyncio.Queue:
+    """Return (lazily creating) the high-priority event queue (donations, subscriptions)."""
+    global _priority_queue
+    if _priority_queue is None:
+        _priority_queue = asyncio.Queue()
+    return _priority_queue
+
+
+async def put_priority(item) -> None:
+    """Enqueue a high-priority event (donation, subscription) that plays before regular items.
+
+    item can be:
+    - str: treated as a live platform event (from_live=True)
+    - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
+    """
+    if isinstance(item, str):
+        item = {"user_input": item, "images": None, "metadata": {"from_live": True}}
+    await get_priority_queue().put(item)
 
 
 # ── User registry ───────────────────────────────────────────────────────────

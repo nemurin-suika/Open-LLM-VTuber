@@ -27,6 +27,8 @@ from .conversations.conversation_handler import (
     handle_group_interrupt,
     handle_individual_interrupt,
 )
+from .conversations.single_conversation import process_single_conversation
+from .message_handler import message_handler as _live_message_handler
 
 
 class MessageType(Enum):
@@ -331,20 +333,20 @@ class WebSocketHandler:
 
         message_handler.cleanup_client(client_uid)
 
-    async def trigger_from_live(self, text: str) -> None:
+    async def trigger_from_live(self, text: str) -> Optional[asyncio.Task]:
         """Trigger a conversation turn from a live platform event.
 
         Uses the most recently connected client's WebSocket and context.
-        Silently drops the event if no client is connected.
+        Returns the created asyncio.Task, or None if no client is connected.
         """
         if not self.client_connections:
             logger.debug("No active clients — dropping live event")
-            return
+            return None
         client_uid = next(reversed(self.client_connections))
         websocket = self.client_connections.get(client_uid)
         context = self.client_contexts.get(client_uid)
         if not websocket or not context:
-            return
+            return None
         await handle_conversation_trigger(
             msg_type="text-input",
             data={"type": "text-input", "text": text},
@@ -359,20 +361,207 @@ class WebSocketHandler:
             broadcast_to_group=self.broadcast_to_group,
             initial_metadata={"from_live": True},
         )
+        # handle_conversation_trigger stores the task synchronously before returning
+        return self.current_conversation_tasks.get(client_uid)
 
     async def start_live_event_loop(self) -> None:
-        """Background loop: consume immediate live events and trigger conversations."""
-        from .live.live_chat_injector import get_immediate_queue
-        queue = get_immediate_queue()
-        logger.info("Live event consumer loop started")
-        try:
-            while True:
-                text = await queue.get()
+        """Background loop for live platform events.
+
+        Two-tier pipeline:
+        - regular_playback_queue: chats and user input (overload at 10)
+        - priority_playback_queue: donations and subscriptions (buffer 100)
+
+        LLM + TTS run in parallel for both tiers. The player always drains
+        priority_playback_queue before taking from regular_playback_queue.
+        """
+        import random
+        from .live.live_chat_injector import get_immediate_queue, get_priority_queue
+
+        REGULAR_MAX_BUFFER = 10
+        PRIORITY_MAX_BUFFER = 100
+
+        _OVERLOAD_PATTERNS = [
+            "[오버로드] 채팅이 갑자기 너무 많이 쏟아져서 다 읽기가 힘들어. 시청자들한테 너무 많이 온다고 자연스럽게 반응해줘.",
+            "[오버로드] 채팅 화력이 감당이 안 될 정도로 쏟아지고 있어. 당황하거나 압도당한 느낌으로 짧게 반응해줘.",
+            "[오버로드] 채팅이 한꺼번에 너무 많이 들어와서 멈춰야 했어. 읽다가 뒤처진 상황에 맞게 반응해줘.",
+            "[오버로드] 갑자기 채팅 폭주가 왔어. 시청자들 화력 칭찬하면서 좀 진정시켜달라고 해줘.",
+            "[오버로드] 채팅이 너무 빠르게 올라와서 하나도 못 읽겠어. 이 상황 솔직하게 토로해줘.",
+        ]
+
+        # Ordered playback queues: each slot is (messages: list, ready: Event)
+        regular_pq: asyncio.Queue = asyncio.Queue()
+        priority_pq: asyncio.Queue = asyncio.Queue()
+
+        # ── helpers ──────────────────────────────────────────────────────────
+
+        async def _capture(item: dict, messages: list, ready: asyncio.Event) -> None:
+            """Run LLM+TTS in capture mode; fill messages, then set ready."""
+            try:
+                if not self.client_connections:
+                    return
+                client_uid = next(reversed(self.client_connections))
+                context = self.client_contexts.get(client_uid)
+                if not context:
+                    return
+
+                user_input = item.get("user_input", "")
+                images = item.get("images")
+                base_meta = dict(item.get("metadata") or {})
+                base_meta["skip_playback_wait"] = True
+
+                captured: list[str] = []
+
+                async def _cap_send(raw: str) -> None:
+                    captured.append(raw)
+
+                await process_single_conversation(
+                    context=context,
+                    websocket_send=_cap_send,
+                    client_uid=client_uid,
+                    user_input=user_input,
+                    images=images,
+                    metadata=base_meta,
+                )
+                messages.extend(captured)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Live capture error: {e}")
+            finally:
+                ready.set()
+
+        async def _replay(messages: list) -> None:
+            """Send captured messages to the real frontend, waiting for playback."""
+            if not messages or not self.client_connections:
+                return
+            client_uid = next(reversed(self.client_connections))
+            ws = self.client_connections.get(client_uid)
+            if not ws:
+                return
+            for raw in messages:
+                await ws.send_text(raw)
                 try:
-                    await self.trigger_from_live(text)
+                    data = json.loads(raw)
+                    if data.get("type") == "backend-synth-complete":
+                        await _live_message_handler.wait_for_response(
+                            client_uid, "frontend-playback-complete"
+                        )
+                except Exception:
+                    pass
+
+        async def _next_slot(prio: asyncio.Queue, regular: asyncio.Queue):
+            """Return next (messages, ready) slot, always preferring prio."""
+            # Non-blocking check first
+            try:
+                return prio.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+
+            prio_task = asyncio.create_task(prio.get())
+            reg_task = asyncio.create_task(regular.get())
+            done, pending = await asyncio.wait(
+                {prio_task, reg_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in list(pending):
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            if prio_task in done:
+                if reg_task in done:
+                    regular.put_nowait(reg_task.result())
+                return prio_task.result()
+
+            # Regular won — check priority one more time before accepting it
+            try:
+                slot = prio.get_nowait()
+                regular.put_nowait(reg_task.result())
+                return slot
+            except asyncio.QueueEmpty:
+                return reg_task.result()
+
+        # ── player ───────────────────────────────────────────────────────────
+
+        async def _player() -> None:
+            while True:
+                messages, ready = await _next_slot(priority_pq, regular_pq)
+                await ready.wait()
+                try:
+                    await _replay(messages)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    logger.error(f"Error processing live event: {e}")
+                    logger.error(f"Live playback error: {e}")
+
+        # ── priority consumer (donations, subscriptions) ──────────────────────
+
+        async def _consume_priority() -> None:
+            pq = get_priority_queue()
+            while True:
+                item = await pq.get()
+                # Drop oldest items if playback buffer is full
+                if priority_pq.qsize() >= PRIORITY_MAX_BUFFER:
+                    logger.warning(
+                        f"Priority playback buffer full ({PRIORITY_MAX_BUFFER}), dropping oldest"
+                    )
+                    try:
+                        priority_pq.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                messages: list = []
+                ready = asyncio.Event()
+                await priority_pq.put((messages, ready))
+                asyncio.create_task(_capture(item, messages, ready))
+
+        # ── regular consumer (chats, user input) ─────────────────────────────
+
+        async def _consume_regular() -> None:
+            rq = get_immediate_queue()
+            while True:
+                item = await rq.get()
+                pending = rq.qsize()
+                if pending > REGULAR_MAX_BUFFER:
+                    drained = 0
+                    while not rq.empty():
+                        try:
+                            rq.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    overload_text = random.choice(_OVERLOAD_PATTERNS)
+                    item = {"user_input": overload_text, "images": None,
+                            "metadata": {"from_live": True}}
+                    logger.warning(
+                        f"Regular queue overloaded ({pending} pending, "
+                        f"drained {drained}) — prompting overload response"
+                    )
+                messages: list = []
+                ready = asyncio.Event()
+                await regular_pq.put((messages, ready))
+                asyncio.create_task(_capture(item, messages, ready))
+
+        # ── run all three concurrently ────────────────────────────────────────
+
+        tasks = [
+            asyncio.create_task(_player()),
+            asyncio.create_task(_consume_priority()),
+            asyncio.create_task(_consume_regular()),
+        ]
+        logger.info(
+            "Live event pipeline started "
+            "(parallel LLM+TTS, priority playback for donations/subscriptions)"
+        )
+        try:
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
             logger.info("Live event consumer loop stopped")
 
     async def broadcast_to_group(
@@ -556,22 +745,53 @@ class WebSocketHandler:
                     )
 
     async def _handle_conversation_trigger(
-        self, websocket: WebSocket, client_uid: str, data: WSMessage
+        self, _websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
-        """Handle triggers that start a conversation"""
-        await handle_conversation_trigger(
-            msg_type=data.get("type", ""),
-            data=data,
-            client_uid=client_uid,
-            context=self.client_contexts[client_uid],
-            websocket=websocket,
-            client_contexts=self.client_contexts,
-            client_connections=self.client_connections,
-            chat_group_manager=self.chat_group_manager,
-            received_data_buffers=self.received_data_buffers,
-            current_conversation_tasks=self.current_conversation_tasks,
-            broadcast_to_group=self.broadcast_to_group,
-        )
+        """Route a conversation trigger into the unified live event queue.
+
+        All inputs — user speech, user text, proactive speak, and live platform
+        events — share the same ordered pipeline so nothing interrupts playback.
+        """
+        from .live.live_chat_injector import put_immediate
+
+        msg_type = data.get("type", "")
+        context = self.client_contexts.get(client_uid)
+
+        if msg_type == "ai-speak-signal":
+            try:
+                from prompts import prompt_loader
+                prompt_file = context.system_config.tool_prompts.get(
+                    "proactive_speak_prompt"
+                ) if context else None
+                user_input = (
+                    prompt_loader.load_util(prompt_file) if prompt_file
+                    else "Please say something."
+                )
+            except Exception:
+                user_input = "Please say something."
+            metadata = {
+                "proactive_speak": True,
+                "skip_memory": True,
+                "skip_history": True,
+            }
+            images = None
+
+        elif msg_type == "text-input":
+            user_input = data.get("text", "")
+            images = data.get("images")
+            metadata = {}
+
+        else:  # mic-audio-end
+            user_input = self.received_data_buffers.get(client_uid, np.array([]))
+            self.received_data_buffers[client_uid] = np.array([])
+            images = data.get("images")
+            metadata = {}
+
+        await put_immediate({
+            "user_input": user_input,
+            "images": images,
+            "metadata": metadata,
+        })
 
     async def _handle_fetch_configs(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

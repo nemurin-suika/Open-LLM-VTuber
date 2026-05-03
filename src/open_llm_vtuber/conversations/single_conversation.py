@@ -100,6 +100,10 @@ async def process_single_conversation(
         if skip_history:
             logger.debug("Skipping storing user input to history (proactive speak)")
 
+        # In capture mode (parallel LLM), skip waiting for frontend-playback-complete.
+        # The captured messages are replayed later by the ordered player.
+        skip_playback_wait = bool(metadata and metadata.get("skip_playback_wait", False))
+
         logger.info(f"User input: {input_text}")
         if images:
             logger.info(f"With {len(images)} images")
@@ -192,6 +196,7 @@ async def process_single_conversation(
             tts_manager=tts_manager,
             websocket_send=websocket_send,
             client_uid=client_uid,
+            skip_playback_wait=skip_playback_wait,
         )
 
         logger.info(f"[PERF] Total conversation: {time.perf_counter() - t_total_start:.3f}s")

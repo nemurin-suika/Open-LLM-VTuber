@@ -164,19 +164,26 @@ async def finalize_conversation_turn(
     websocket_send: WebSocketSend,
     client_uid: str,
     broadcast_ctx: Optional[BroadcastContext] = None,
+    skip_playback_wait: bool = False,
 ) -> None:
-    """Finalize a conversation turn"""
+    """Finalize a conversation turn.
+
+    Args:
+        skip_playback_wait: When True, skip waiting for frontend-playback-complete.
+            Used in capture mode where audio is not yet sent to the real frontend.
+    """
     if tts_manager.task_list:
         await asyncio.gather(*tts_manager.task_list)
         await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
-        response = await message_handler.wait_for_response(
-            client_uid, "frontend-playback-complete"
-        )
+        if not skip_playback_wait:
+            response = await message_handler.wait_for_response(
+                client_uid, "frontend-playback-complete"
+            )
 
-        if not response:
-            logger.warning(f"No playback completion response from {client_uid}")
-            return
+            if not response:
+                logger.warning(f"No playback completion response from {client_uid}")
+                return
 
     await websocket_send(json.dumps({"type": "force-new-message"}))
 

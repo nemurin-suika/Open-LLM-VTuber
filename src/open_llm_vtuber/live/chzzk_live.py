@@ -145,7 +145,7 @@ class ChzzkLivePlatform:
                     else:
                         return
 
-                    await live_chat_injector.put_immediate(event_text)
+                    await live_chat_injector.put_priority(event_text)
                 except Exception as e:
                     logger.error(f"Error handling donation: {e}")
 
@@ -161,7 +161,7 @@ class ChzzkLivePlatform:
                     event_text = self._subscription_format.format(
                         username=username, month=month
                     )
-                    await live_chat_injector.put_immediate(event_text)
+                    await live_chat_injector.put_priority(event_text)
                 except Exception as e:
                     logger.error(f"Error handling subscription: {e}")
 
