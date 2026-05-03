@@ -378,7 +378,7 @@ class WebSocketHandler:
         from .live.live_chat_injector import get_immediate_queue, get_priority_queue
 
         REGULAR_MAX_BUFFER = 10
-        PRIORITY_MAX_BUFFER = 100
+        PRIORITY_MAX_BUFFER = 10
 
         _OVERLOAD_PATTERNS = [
             "[오버로드] 채팅이 갑자기 너무 많이 쏟아져서 다 읽기가 힘들어. 시청자들한테 너무 많이 온다고 자연스럽게 반응해줘.",
@@ -431,23 +431,43 @@ class WebSocketHandler:
                 ready.set()
 
         async def _replay(messages: list) -> None:
-            """Send captured messages to the real frontend, waiting for playback."""
+            """Send captured messages to the real frontend, waiting for playback.
+
+            Uses try/finally so frontend-playback-complete is always awaited even
+            if sending fails mid-stream — preventing TTS overlap in error cases.
+            """
             if not messages or not self.client_connections:
                 return
             client_uid = next(reversed(self.client_connections))
             ws = self.client_connections.get(client_uid)
             if not ws:
                 return
-            for raw in messages:
-                await ws.send_text(raw)
-                try:
-                    data = json.loads(raw)
-                    if data.get("type") == "backend-synth-complete":
+
+            has_audio = False
+            send_failed = False
+            try:
+                for raw in messages:
+                    await ws.send_text(raw)
+                    try:
+                        if json.loads(raw).get("type") == "audio":
+                            has_audio = True
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Error during replay send: {e}")
+                send_failed = True
+            finally:
+                if has_audio:
+                    if send_failed:
+                        # Sending failed partway — use a brief delay as safety buffer
+                        # so the next output doesn't start while frontend may still be playing
+                        await asyncio.sleep(2.0)
+                    else:
+                        # Normal path: wait until frontend confirms playback is done
                         await _live_message_handler.wait_for_response(
-                            client_uid, "frontend-playback-complete"
+                            client_uid, "frontend-playback-complete",
+                            timeout=120.0,
                         )
-                except Exception:
-                    pass
 
         async def _next_slot(prio: asyncio.Queue, regular: asyncio.Queue):
             """Return next (messages, ready) slot, always preferring prio."""
@@ -519,28 +539,93 @@ class WebSocketHandler:
 
         async def _consume_regular() -> None:
             rq = get_immediate_queue()
-            while True:
-                item = await rq.get()
-                pending = rq.qsize()
-                if pending > REGULAR_MAX_BUFFER:
-                    drained = 0
-                    while not rq.empty():
-                        try:
-                            rq.get_nowait()
-                            drained += 1
-                        except asyncio.QueueEmpty:
-                            break
-                    overload_text = random.choice(_OVERLOAD_PATTERNS)
-                    item = {"user_input": overload_text, "images": None,
-                            "metadata": {"from_live": True}}
-                    logger.warning(
-                        f"Regular queue overloaded ({pending} pending, "
-                        f"drained {drained}) — prompting overload response"
+
+            CHAT_BUFFER_THRESHOLD = 5    # Start buffering live chats when pq depth > this
+            CHAT_BUFFER_TIMEOUT = 10.0   # Seconds to accumulate before sending batch
+            BATCH_HEADER = "[시청자 채팅]"
+
+            chat_buffer: list[str] = []  # Accumulates live chat texts during buffer mode
+
+            async def _flush_chat_buffer() -> None:
+                if not chat_buffer:
+                    return
+                texts = list(chat_buffer)
+                chat_buffer.clear()
+                batch_text = BATCH_HEADER + "\n" + "\n".join(texts)
+                logger.info(f"[Chat Buffer Flush] {len(texts)}개 채팅 배치 전송")
+                batch_item = {
+                    "user_input": batch_text,
+                    "images": None,
+                    "metadata": {"from_live": True},
+                }
+                msgs, rdy = [], asyncio.Event()
+                await regular_pq.put((msgs, rdy))
+                asyncio.create_task(_capture(batch_item, msgs, rdy))
+
+            async def _buffer_timer_loop() -> None:
+                """Periodically flush the chat buffer even if playback queue stays full."""
+                while True:
+                    await asyncio.sleep(CHAT_BUFFER_TIMEOUT)
+                    if chat_buffer:
+                        logger.debug("[Chat Buffer] Timer flush triggered")
+                        await _flush_chat_buffer()
+
+            timer_task = asyncio.create_task(_buffer_timer_loop())
+
+            try:
+                while True:
+                    item = await rq.get()
+
+                    # Incoming overload check (too many items in the incoming queue)
+                    pending = rq.qsize()
+                    if pending > REGULAR_MAX_BUFFER:
+                        drained = 0
+                        while not rq.empty():
+                            try:
+                                rq.get_nowait()
+                                drained += 1
+                            except asyncio.QueueEmpty:
+                                break
+                        await _flush_chat_buffer()  # flush before overload message
+                        overload_text = random.choice(_OVERLOAD_PATTERNS)
+                        item = {"user_input": overload_text, "images": None,
+                                "metadata": {"from_live": True}}
+                        logger.warning(
+                            f"Regular queue overloaded ({pending} pending, "
+                            f"drained {drained}) — prompting overload response"
+                        )
+
+                    # Determine if this is a live chat eligible for buffering
+                    is_live_chat = (
+                        isinstance(item.get("user_input"), str)
+                        and bool(item.get("metadata", {}).get("from_live"))
                     )
-                messages: list = []
-                ready = asyncio.Event()
-                await regular_pq.put((messages, ready))
-                asyncio.create_task(_capture(item, messages, ready))
+
+                    if is_live_chat and regular_pq.qsize() > CHAT_BUFFER_THRESHOLD:
+                        # Playback queue is deep — buffer this chat instead of
+                        # immediately starting a new LLM call
+                        chat_buffer.append(item["user_input"])
+                        logger.debug(
+                            f"[Chat Buffer] pq={regular_pq.qsize()} "
+                            f"→ buffered ({len(chat_buffer)}개): {item['user_input'][:60]}"
+                        )
+                        continue
+
+                    # Normal path: flush any pending buffer first so it plays
+                    # before (or merged into) the current item
+                    if chat_buffer:
+                        await _flush_chat_buffer()
+
+                    msgs: list = []
+                    rdy = asyncio.Event()
+                    await regular_pq.put((msgs, rdy))
+                    asyncio.create_task(_capture(item, msgs, rdy))
+            finally:
+                timer_task.cancel()
+                try:
+                    await timer_task
+                except asyncio.CancelledError:
+                    pass
 
         # ── run all three concurrently ────────────────────────────────────────
 
@@ -786,6 +871,15 @@ class WebSocketHandler:
             self.received_data_buffers[client_uid] = np.array([])
             images = data.get("images")
             metadata = {}
+
+        # Drop screenshot images when enable_screen_capture is False
+        screen_capture_enabled = (
+            context.system_config.enable_screen_capture
+            if context and hasattr(context, "system_config")
+            else True
+        )
+        if not screen_capture_enabled:
+            images = None
 
         await put_immediate({
             "user_input": user_input,

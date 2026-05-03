@@ -2,7 +2,6 @@ from typing import Union, List, Dict, Any, Optional
 import asyncio
 import json
 import re
-import time
 from loguru import logger
 import numpy as np
 
@@ -60,16 +59,10 @@ async def process_single_conversation(
         await send_conversation_start_signals(websocket_send)
         logger.info(f"New Conversation Chain {session_emoji} started!")
 
-        t_total_start = time.perf_counter()
-
         # Process user input
-        t_asr_start = time.perf_counter()
         input_text = await process_user_input(
             user_input, context.asr_engine, websocket_send
         )
-        t_asr_end = time.perf_counter()
-        if isinstance(user_input, np.ndarray):
-            logger.info(f"[PERF] ASR total: {t_asr_end - t_asr_start:.3f}s")
 
         # Wrap nemurin's direct input so it's distinguishable from viewer chats
         is_proactive = metadata and metadata.get("proactive_speak", False)
@@ -110,8 +103,6 @@ async def process_single_conversation(
 
         try:
             # agent.chat yields Union[SentenceOutput, Dict[str, Any]]
-            t_llm_start = time.perf_counter()
-            _llm_first_output = False
             agent_output_stream = context.agent_engine.chat(batch_input)
 
             async for output_item in agent_output_stream:
@@ -126,9 +117,6 @@ async def process_single_conversation(
                     await websocket_send(json.dumps(output_item))
 
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
-                    if not _llm_first_output:
-                        _llm_first_output = True
-                        logger.info(f"[PERF] LLM first output: {time.perf_counter() - t_llm_start:.3f}s")
 
                     # [채팅제한 username] 패턴 감지 및 처리
                     if isinstance(output_item, SentenceOutput):
@@ -168,8 +156,6 @@ async def process_single_conversation(
                     )
                     logger.debug(f"Unexpected item content: {output_item}")
 
-            logger.info(f"[PERF] LLM total: {time.perf_counter() - t_llm_start:.3f}s")
-
         except Exception as e:
             logger.exception(
                 f"Error processing agent response stream: {e}"
@@ -187,9 +173,7 @@ async def process_single_conversation(
 
         # Wait for any pending TTS tasks
         if tts_manager.task_list:
-            t_tts_gather_start = time.perf_counter()
             await asyncio.gather(*tts_manager.task_list)
-            logger.info(f"[PERF] All TTS tasks done: {time.perf_counter() - t_tts_gather_start:.3f}s")
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
         await finalize_conversation_turn(
@@ -198,8 +182,6 @@ async def process_single_conversation(
             client_uid=client_uid,
             skip_playback_wait=skip_playback_wait,
         )
-
-        logger.info(f"[PERF] Total conversation: {time.perf_counter() - t_total_start:.3f}s")
 
         if not skip_history and context.history_uid:
             if input_text:
