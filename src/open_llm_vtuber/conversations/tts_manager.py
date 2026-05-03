@@ -176,6 +176,16 @@ class TTSTaskManager:
         logger.info(f"[PERF] TTS: {elapsed:.3f}s | \"{text[:60]}{'...' if len(text) > 60 else ''}\"")
         return result
 
+    async def wait_for_delivery(self) -> None:
+        """Wait until all queued audio payloads have been delivered via websocket_send.
+
+        Must be called after asyncio.gather(*task_list) to ensure _sender_task has
+        fully processed every payload before backend-synth-complete is sent.
+        Without this, audio messages appended by _sender_task after gather() completes
+        would be missed from the capture buffer, causing TTS overlap.
+        """
+        await self._payload_queue.join()
+
     def clear(self) -> None:
         """Clear all pending tasks and reset state"""
         self.task_list.clear()

@@ -71,6 +71,11 @@ async def process_single_conversation(
             _human = context.character_config.human_name
             input_text = f"[{_human}]\n{input_text}\n[/{_human}]"
 
+        # Inject current date/time so the LLM always knows when the conversation is
+        from datetime import datetime as _dt
+        _now = _dt.now().strftime("%Y-%m-%d %H:%M")
+        input_text = f"[현재 시각: {_now}]\n{input_text}" if input_text else f"[현재 시각: {_now}]"
+
         # Inject real-time viewer count when the stream is live (count > 0)
         try:
             from ..live.live_chat_injector import get_viewer_count as _get_viewer_count
@@ -171,9 +176,15 @@ async def process_single_conversation(
             # full_response will contain partial response before error
         # --- End processing agent response ---
 
-        # Wait for any pending TTS tasks
+        # Wait for any pending TTS tasks.
+        # First gather() waits for all TTS audio files to be generated.
+        # Then wait_for_delivery() waits for _sender_task to finish sending ALL
+        # payloads to websocket_send — without this, some audio messages would
+        # still be in _payload_queue when backend-synth-complete is appended,
+        # causing TTS overlap in the capture pipeline.
         if tts_manager.task_list:
             await asyncio.gather(*tts_manager.task_list)
+            await tts_manager.wait_for_delivery()
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
         await finalize_conversation_turn(

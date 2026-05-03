@@ -172,8 +172,9 @@ async def finalize_conversation_turn(
         skip_playback_wait: When True, skip waiting for frontend-playback-complete.
             Used in capture mode where audio is not yet sent to the real frontend.
     """
-    if tts_manager.task_list:
+    if tts_manager.task_list and not skip_playback_wait:
         await asyncio.gather(*tts_manager.task_list)
+        await tts_manager.wait_for_delivery()
         await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
         if not skip_playback_wait:

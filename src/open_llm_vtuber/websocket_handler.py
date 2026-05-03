@@ -28,7 +28,7 @@ from .conversations.conversation_handler import (
     handle_individual_interrupt,
 )
 from .conversations.single_conversation import process_single_conversation
-from .message_handler import message_handler as _live_message_handler
+from .message_handler import message_handler
 
 
 class MessageType(Enum):
@@ -175,8 +175,7 @@ class WebSocketHandler:
         # Send initial group status
         await self.send_group_update(websocket, client_uid)
 
-        # Start microphone
-        await websocket.send_text(json.dumps({"type": "control", "text": "start-mic"}))
+        # Microphone is off by default — user enables it manually via the UI
 
     async def _init_service_context(
         self, send_text: Callable, client_uid: str
@@ -396,6 +395,8 @@ class WebSocketHandler:
 
         async def _capture(item: dict, messages: list, ready: asyncio.Event) -> None:
             """Run LLM+TTS in capture mode; fill messages, then set ready."""
+            user_input_preview = str(item.get("user_input", ""))[:40]
+            logger.debug(f"[TTS-DBG] capture start: {user_input_preview!r}")
             try:
                 if not self.client_connections:
                     return
@@ -423,6 +424,16 @@ class WebSocketHandler:
                     metadata=base_meta,
                 )
                 messages.extend(captured)
+                # Count captured audio chunks for diagnostics
+                real_audio = sum(
+                    1 for m in captured
+                    if "\"type\": \"audio\"" in m and "\"audio\": null" not in m
+                    and "\"audio\": None" not in m
+                )
+                logger.debug(
+                    f"[TTS-DBG] capture done: {user_input_preview!r} "
+                    f"({len(captured)} msgs, {real_audio} audio chunks)"
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -430,11 +441,14 @@ class WebSocketHandler:
             finally:
                 ready.set()
 
-        async def _replay(messages: list) -> None:
-            """Send captured messages to the real frontend, waiting for playback.
+        async def _replay(messages: list, idx: int = 0) -> None:
+            """Send captured messages with progressive audio delivery.
 
-            Uses try/finally so frontend-playback-complete is always awaited even
-            if sending fails mid-stream — preventing TTS overlap in error cases.
+            In normal (non-capture) mode audio chunks arrive one at a time as TTS
+            generates (~2-3s per sentence). In replay mode all chunks would arrive
+            within milliseconds, causing the frontend to play them simultaneously.
+            Progressive delivery adds a per-chunk delay equal to its duration so the
+            frontend receives chunks at the same pace as normal mode.
             """
             if not messages or not self.client_connections:
                 return
@@ -443,31 +457,46 @@ class WebSocketHandler:
             if not ws:
                 return
 
-            has_audio = False
+            total_audio_ms = 0
+            audio_chunk_count = 0
             send_failed = False
             try:
                 for raw in messages:
                     await ws.send_text(raw)
                     try:
-                        if json.loads(raw).get("type") == "audio":
-                            has_audio = True
+                        data = json.loads(raw)
+                        if data.get("type") == "audio" and data.get("audio"):
+                            volumes = data.get("volumes") or []
+                            slice_ms = data.get("slice_length") or 20
+                            chunk_ms = len(volumes) * slice_ms
+                            total_audio_ms += chunk_ms
+                            audio_chunk_count += 1
+                            logger.debug(
+                                f"[TTS-DBG #{idx}]   audio chunk {audio_chunk_count}: "
+                                f"{chunk_ms}ms  (cumul={total_audio_ms}ms)"
+                            )
+                            # Progressive: wait for this chunk to play before sending next
+                            await asyncio.sleep(chunk_ms / 1000)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         pass
             except Exception as e:
-                logger.warning(f"Error during replay send: {e}")
+                logger.warning(f"[TTS-DBG #{idx}] Error during replay send: {e}")
                 send_failed = True
             finally:
-                if has_audio:
+                if total_audio_ms > 0:
                     if send_failed:
-                        # Sending failed partway — use a brief delay as safety buffer
-                        # so the next output doesn't start while frontend may still be playing
                         await asyncio.sleep(2.0)
                     else:
-                        # Normal path: wait until frontend confirms playback is done
-                        await _live_message_handler.wait_for_response(
-                            client_uid, "frontend-playback-complete",
-                            timeout=120.0,
+                        # Small buffer after the last chunk finishes
+                        logger.info(
+                            f"[TTS-DBG #{idx}] ⏳ progressive done: "
+                            f"{audio_chunk_count} chunks, {total_audio_ms}ms"
                         )
+                        await asyncio.sleep(0.3)
+                elif audio_chunk_count == 0:
+                    logger.info(f"[TTS-DBG #{idx}]   no real audio — skipping wait")
 
         async def _next_slot(prio: asyncio.Queue, regular: asyncio.Queue):
             """Return next (messages, ready) slot, always preferring prio."""
@@ -504,12 +533,19 @@ class WebSocketHandler:
 
         # ── player ───────────────────────────────────────────────────────────
 
+        _play_idx = 0  # monotonic counter to correlate log lines per output
+
         async def _player() -> None:
+            nonlocal _play_idx
             while True:
                 messages, ready = await _next_slot(priority_pq, regular_pq)
                 await ready.wait()
+                _play_idx += 1
+                idx = _play_idx
+                logger.info(f"[TTS-DBG #{idx}] ▶ replay start  (pq_regular={regular_pq.qsize()} pq_priority={priority_pq.qsize()})")
                 try:
-                    await _replay(messages)
+                    await _replay(messages, idx)
+                    logger.info(f"[TTS-DBG #{idx}] ✓ replay done")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -688,27 +724,14 @@ class WebSocketHandler:
     async def _handle_interrupt(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
-        """Handle conversation interruption"""
-        heard_response = data.get("text", "")
-        context = self.client_contexts[client_uid]
-        group = self.chat_group_manager.get_client_group(client_uid)
+        """Handle conversation interruption.
 
-        if group and len(group.members) > 1:
-            await handle_group_interrupt(
-                group_id=group.group_id,
-                heard_response=heard_response,
-                current_conversation_tasks=self.current_conversation_tasks,
-                chat_group_manager=self.chat_group_manager,
-                client_contexts=self.client_contexts,
-                broadcast_to_group=self.broadcast_to_group,
-            )
-        else:
-            await handle_individual_interrupt(
-                client_uid=client_uid,
-                current_conversation_tasks=self.current_conversation_tasks,
-                context=context,
-                heard_response=heard_response,
-            )
+        Only the explicit frontend interrupt button should reach here.
+        Automatic sources (VAD, text submission) are disabled upstream.
+        The frontend already stops its own audio when the button is pressed,
+        which sends frontend-playback-complete and naturally unblocks the player.
+        """
+        logger.debug(f"Interrupt signal received from {client_uid} — no server action taken")
 
     async def _handle_history_list_request(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
@@ -814,9 +837,7 @@ class WebSocketHandler:
         if chunk:
             for audio_bytes in context.vad_engine.detect_speech(chunk):
                 if audio_bytes == b"<|PAUSE|>":
-                    await websocket.send_text(
-                        json.dumps({"type": "control", "text": "interrupt"})
-                    )
+                    pass  # Interrupt disabled — only the explicit button may interrupt
                 elif audio_bytes == b"<|RESUME|>":
                     pass
                 elif len(audio_bytes) > 1024:
