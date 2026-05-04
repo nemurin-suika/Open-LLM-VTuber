@@ -866,15 +866,22 @@ class WebSocketHandler:
         if msg_type == "ai-speak-signal":
             try:
                 from prompts import prompt_loader
+                from .conversations.conversation_handler import (
+                    _parse_proactive_prompt,
+                    _pick_proactive_variant,
+                )
                 prompt_file = context.system_config.tool_prompts.get(
                     "proactive_speak_prompt"
                 ) if context else None
-                user_input = (
-                    prompt_loader.load_util(prompt_file) if prompt_file
-                    else "Please say something."
-                )
+                if prompt_file:
+                    raw = prompt_loader.load_util(prompt_file)
+                    viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
+                    chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
+                else:
+                    chosen = "뭔가 자연스럽게 혼잣말을 해줘."
+                user_input = f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
             except Exception:
-                user_input = "Please say something."
+                user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
             metadata = {
                 "proactive_speak": True,
                 "skip_memory": True,

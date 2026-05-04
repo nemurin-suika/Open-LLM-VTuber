@@ -123,6 +123,13 @@ async def process_single_conversation(
 
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
 
+                    # [IGNORE] 감지: TTS 없이 즉시 종료
+                    if isinstance(output_item, SentenceOutput) and not tts_manager.task_list:
+                        if output_item.tts_text.strip() == "[IGNORE]":
+                            logger.debug("LLM responded with [IGNORE], skipping turn")
+                            await websocket_send(json.dumps({"type": "control", "text": "conversation-chain-end"}))
+                            return ""
+
                     # [채팅제한 username] 패턴 감지 및 처리
                     if isinstance(output_item, SentenceOutput):
                         matches = _RESTRICT_PATTERN.findall(output_item.tts_text)
