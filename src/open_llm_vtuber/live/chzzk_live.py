@@ -15,8 +15,8 @@ from typing import Optional
 from loguru import logger
 
 try:
-    from chzzkpy import ChatClient as ChzzkChatClient
-    from chzzkpy.chat.message import (
+    from chzzkpy.unofficial.chat import ChatClient as ChzzkChatClient
+    from chzzkpy.unofficial.chat import (
         ChatMessage,
         DonationMessage,
         SubscriptionMessage,
@@ -55,7 +55,7 @@ class ChzzkLivePlatform:
         chat_format: str = "[채팅] {username}: {message}",
         donation_format: str = "[후원] {username}님이 {amount}원 후원: {message}",
         mission_format: str = "[미션] {username}님의 미션 ({amount}원): {mission}",
-        subscription_format: str = "[구독] {username}님이 {month}개월째 구독 중!",
+        subscription_format: str = "[구독] {username}님이 {month}개월째 구독 중! {message}",
     ):
         if not CHZZKPY_AVAILABLE:
             raise ImportError(
@@ -123,6 +123,12 @@ class ChzzkLivePlatform:
                         if not is_mission and hasattr(extras, "donation_type"):
                             is_mission = str(extras.donation_type).upper() == "MISSION"
 
+                    if extras is not None:
+                        try:
+                            logger.info(f"[Chzzk Donation] extras type={type(extras).__name__} data={extras.model_dump()}")
+                        except Exception:
+                            logger.info(f"[Chzzk Donation] extras type={type(extras).__name__} raw={extras}")
+
                     if is_mission:
                         mission_text = getattr(extras, "mission_text", content) or content
                         amount = getattr(extras, "pay_amount", 0) or 0
@@ -136,12 +142,25 @@ class ChzzkLivePlatform:
                             amount=amount,
                             message=content,
                         )
+                        logger.info(f"[Chzzk Mission] → LLM: {event_text}")
                     elif self._handle_donation:
-                        amount = getattr(extras, "pay_amount", 0) if extras else 0
-                        logger.info(f"[Chzzk Donation] {username}: {amount}원")
-                        event_text = self._donation_format.format(
-                            username=username, amount=amount, message=content
-                        )
+                        amount = extras.pay_amount if extras is not None else 0
+                        pay_type = getattr(extras, "pay_type", "") or ""
+                        continuous_days = None
+                        if extras is not None and hasattr(extras, "model_extra") and extras.model_extra:
+                            continuous_days = extras.model_extra.get("continuousDonationDays")
+                        logger.info(f"[Chzzk Donation] {username}: {amount} (pay_type={pay_type}, continuous={continuous_days})")
+                        if amount > 0:
+                            event_text = self._donation_format.format(
+                                username=username, amount=amount, message=content
+                            )
+                        elif continuous_days is not None:
+                            # CURRENCY 타입 연속 후원: Chzzk WebSocket이 금액을 보내지 않음
+                            msg = f": {content}" if content else "!"
+                            event_text = f"[연속 후원] {username}님이 {continuous_days}일째 연속 후원{msg}"
+                        else:
+                            event_text = f"[응원] {username}님이 응원: {content}" if content else f"[응원] {username}님이 응원했습니다!"
+                        logger.info(f"[Chzzk Donation] → LLM: {event_text}")
                     else:
                         return
 
@@ -156,11 +175,14 @@ class ChzzkLivePlatform:
                 try:
                     username = self._get_nickname(message)
                     extras = getattr(message, "extras", None)
-                    month = getattr(extras, "month", 1) if extras else 1
-                    logger.info(f"[Chzzk Subscription] {username}: {month}개월")
+                    month = extras.month if extras is not None else 1
+                    content = getattr(message, "content", "") or ""
+                    logger.info(f"[Chzzk Subscription] {username}: {month}개월 메시지={content!r}")
                     event_text = self._subscription_format.format(
-                        username=username, month=month
+                        username=username, month=month, message=content
                     )
+                    event_text = event_text.strip()
+                    logger.info(f"[Chzzk Subscription] → LLM: {event_text}")
                     await live_chat_injector.put_priority(event_text)
                 except Exception as e:
                     logger.error(f"Error handling subscription: {e}")
@@ -174,20 +196,18 @@ class ChzzkLivePlatform:
             logger.error(f"Chzzk Live error: {error}")
 
     async def _viewer_count_poll_loop(self) -> None:
-        from chzzkpy import Client as ChzzkHttpClient
         logger.info("Viewer count polling started (interval: 60s)")
         while self._running:
             try:
-                client_kwargs = {}
-                if self._authorization_key:
-                    client_kwargs["authorization_key"] = self._authorization_key
-                if self._session_key:
-                    client_kwargs["session_key"] = self._session_key
-                async with ChzzkHttpClient(**client_kwargs) as client:
-                    status = await client.live_status(self._channel_id)
-                    count = status.concurrent_user_count if status else 0
-                    live_chat_injector.set_viewer_count(count)
-                    logger.debug(f"[Chzzk] Viewer count updated: {count}")
+                client = self._chat_client
+                # Only poll after the chat client has fully connected (ready event set)
+                if client is None or not client._ready.is_set():
+                    await asyncio.sleep(5)
+                    continue
+                status = await client.live_status(self._channel_id)
+                count = status.concurrent_user_count if status else 0
+                live_chat_injector.set_viewer_count(count)
+                logger.debug(f"[Chzzk] Viewer count updated: {count}")
             except Exception as e:
                 logger.warning(f"[Chzzk] Viewer count poll failed: {e}")
             await asyncio.sleep(60)
@@ -226,22 +246,23 @@ class ChzzkLivePlatform:
 
         try:
             while self._running:
-                client = ChzzkChatClient(channel_id=self._channel_id)
+                client = ChzzkChatClient(
+                    channel_id=self._channel_id,
+                    authorization_key=self._authorization_key,
+                    session_key=self._session_key,
+                )
                 self._chat_client = client
                 self._setup_events(client)
                 viewer_poll_task = asyncio.create_task(self._viewer_count_poll_loop())
                 try:
-                    await client.start(
-                        authorization_key=self._authorization_key,
-                        session_key=self._session_key,
-                    )
+                    await client.start()
                     break
                 except asyncio.CancelledError:
                     logger.info("Chzzk Live platform cancelled")
                     return
                 except Exception as e:
                     logger.error(f"Chzzk Live error: {e}")
-                    logger.debug(traceback.format_exc())
+                    logger.warning(traceback.format_exc())
                     if self._running:
                         logger.info(f"Reconnecting in {retry_delay}s...")
                         await asyncio.sleep(retry_delay)

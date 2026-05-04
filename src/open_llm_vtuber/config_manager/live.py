@@ -39,7 +39,7 @@ class ChzzkLiveConfig(I18nMixin):
         "[미션] {username}님의 미션 ({amount}원): {mission}", alias="mission_format"
     )
     subscription_format: str = Field(
-        "[구독] {username}님이 {month}개월째 구독 중!", alias="subscription_format"
+        "[구독] {username}님이 {month}개월째 구독 중! {message}", alias="subscription_format"
     )
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {

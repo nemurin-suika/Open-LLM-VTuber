@@ -3,7 +3,7 @@ name = "open-llm-vtuber"
 version = "1.2.1"
 description = "Talk to any LLM with hands-free voice interaction, voice interruption, and Live2D taking face running locally across platforms"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "anthropic>=0.40.0",
     "azure-cognitiveservices-speech>=1.41.1",
@@ -39,13 +39,18 @@ dependencies = [
     "letta-client>=1.0.000",
     "duckduckgo-mcp-server>=0.1.1",
     "pillow>=12.2.0",
+    "chzzkpy>=2.1.5",
+    "pydantic>=2.12.3,<2.13",
 ]
 
 [project.optional-dependencies]
 bilibili = [
-    "aiohttp~=3.9.0",
-    "Brotli~=1.1.0",
-    "yarl~=1.9.3",
+    "aiohttp>=3.9.0",
+    "Brotli>=1.1.0",
+    "yarl>=1.9.3",
+]
+chzzk = [
+    "chzzkpy>=0.3.0",
 ]
 
 [tool.pixi.project]
@@ -64,4 +69,4 @@ target-version = "py310"
 
 [tool.ruff.lint]
 # Ignore E402 (module level import not at top of file) for the run_bilibili_live.py script
-per-file-ignores = { "scripts/run_bilibili_live.py" = ["E402"] }
+per-file-ignores = { "scripts/run_bilibili_live.py" = ["E402"], "scripts/run_chzzk_live.py" = ["E402"] }
