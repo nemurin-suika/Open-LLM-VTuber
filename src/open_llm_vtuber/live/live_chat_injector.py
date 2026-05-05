@@ -12,7 +12,16 @@ the conversation pipeline.
 """
 
 import asyncio
+import re
 from typing import Callable, Awaitable, Dict, Optional
+
+_YT_PATTERN = re.compile(
+    r"(https?://(?:www\.)?(?:youtube\.com/watch\?[^\s]*v=|youtu\.be/)[\w\-]+[^\s]*)"
+)
+
+
+def _tag_youtube_links(text: str) -> str:
+    return _YT_PATTERN.sub(r"[유튜브 링크]\1[/유튜브 링크]", text)
 
 # Lazy-initialized to avoid "no running event loop" errors at import time
 _immediate_queue: Optional[asyncio.Queue] = None
@@ -48,7 +57,7 @@ async def put_immediate(item) -> None:
     - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
     """
     if isinstance(item, str):
-        item = {"user_input": item, "images": None, "metadata": {"from_live": True}}
+        item = {"user_input": _tag_youtube_links(item), "images": None, "metadata": {"from_live": True}}
     await get_immediate_queue().put(item)
 
 
@@ -68,7 +77,7 @@ async def put_priority(item) -> None:
     - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
     """
     if isinstance(item, str):
-        item = {"user_input": item, "images": None, "metadata": {"from_live": True}}
+        item = {"user_input": _tag_youtube_links(item), "images": None, "metadata": {"from_live": True}}
     await get_priority_queue().put(item)
 
 

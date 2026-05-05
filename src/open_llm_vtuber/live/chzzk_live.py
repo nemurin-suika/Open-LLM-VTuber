@@ -10,6 +10,7 @@ immediate_queue and trigger standalone conversation turns.
 
 import asyncio
 import traceback
+import urllib.parse
 from typing import Optional
 
 from loguru import logger
@@ -31,6 +32,18 @@ except ImportError as e:
     CHZZKPY_AVAILABLE = False
 
 from . import live_chat_injector
+
+
+_BLOCKED_KEYWORDS = [
+    "프롬프트",   # Korean
+    "プロンプト",  # Japanese
+    "prompt",     # English (case-insensitive match applied at call site)
+]
+
+
+def _is_blocked_chat(content: str) -> bool:
+    lower = content.lower()
+    return any(kw in lower for kw in _BLOCKED_KEYWORDS)
 
 
 class ChzzkLivePlatform:
@@ -99,6 +112,9 @@ class ChzzkLivePlatform:
                     content = getattr(message, "content", "") or ""
                     user_id = getattr(message, "user_id", None) or ""
                     logger.info(f"[Chzzk Chat] {username}: {content}")
+                    if _is_blocked_chat(content):
+                        logger.info(f"[Chzzk Chat] 필터링됨 (프롬프트 관련): {username}: {content}")
+                        return
                     live_chat_injector.register_user(username, user_id)
                     text = self._chat_format.format(username=username, message=content)
                     await live_chat_injector.put_immediate(text)
@@ -143,6 +159,19 @@ class ChzzkLivePlatform:
                             message=content,
                         )
                         logger.info(f"[Chzzk Mission] → LLM: {event_text}")
+                    elif getattr(extras, "donation_type", None) == "VIDEO" and self._handle_donation:
+                        amount = getattr(extras, "pay_amount", 0) or 0
+                        video_title = content or "제목 없음"
+                        search_url = (
+                            "https://www.youtube.com/results?search_query="
+                            + urllib.parse.quote_plus(video_title)
+                        )
+                        event_text = (
+                            f"[영상 후원] {username}님이 {amount}원 영상 후원!\n"
+                            f"영상 제목: {video_title}\n"
+                            f"유튜브 검색 결과: [유튜브 링크]{search_url}[/유튜브 링크]"
+                        )
+                        logger.info(f"[Chzzk Video Donation] → LLM: {event_text}")
                     elif self._handle_donation:
                         amount = extras.pay_amount if extras is not None else 0
                         pay_type = getattr(extras, "pay_type", "") or ""

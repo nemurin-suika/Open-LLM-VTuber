@@ -1,4 +1,9 @@
+import json
+import re
+import urllib.parse
+import urllib.request
 from typing import AsyncIterator, Dict, Any, List, Optional, Union
+
 from loguru import logger
 from .agent_interface import AgentInterface
 from ..output_types import SentenceOutput
@@ -19,6 +24,71 @@ from letta_client.types.agents.image_content_param import (
 )
 
 _SEP = "=" * 60
+
+# ---------------------------------------------------------------------------
+# 유튜브 링크 전처리: [유튜브 링크]...[/유튜브 링크] 안의 검색 결과 URL을
+# 실제 영상 URL로 교체해서 letta(claude -p)에 깔끔하게 전달
+# ---------------------------------------------------------------------------
+_YOUTUBE_TAG_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.DOTALL)
+_YT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
+
+
+def _yt_fetch(url: str, timeout: int = 10) -> str:
+    req = urllib.request.Request(url, headers=_YT_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _yt_first_video_url(html: str) -> str:
+    """검색 결과 HTML에서 첫 번째 영상 URL을 반환."""
+    m = re.search(r"var ytInitialData = ({.*?});</script>", html, re.DOTALL)
+    if not m:
+        return ""
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return ""
+    sections = (
+        data.get("contents", {})
+        .get("twoColumnSearchResultsRenderer", {})
+        .get("primaryContents", {})
+        .get("sectionListRenderer", {})
+        .get("contents", [])
+    )
+    for section in sections:
+        for item in section.get("itemSectionRenderer", {}).get("contents", []):
+            vid = item.get("videoRenderer", {}).get("videoId", "")
+            if vid:
+                return f"https://www.youtube.com/watch?v={vid}"
+    return ""
+
+
+def _resolve_youtube_url(url: str) -> str:
+    """검색 결과 URL이면 첫 번째 영상 URL로 교체, 영상 URL이면 그대로 반환."""
+    try:
+        if "results" in urllib.parse.urlparse(url).path:
+            html = _yt_fetch(url)
+            resolved = _yt_first_video_url(html)
+            if resolved:
+                logger.info(f"[YouTube] 검색 결과 → 영상 URL: {resolved}")
+                return resolved
+    except Exception as e:
+        logger.warning(f"[YouTube] URL 해석 실패 ({url}): {e}")
+    return url
+
+
+def _preprocess_youtube_links(text: str) -> str:
+    """[유튜브 링크] 태그 안의 URL을 실제 영상 URL로 교체."""
+    def replace(m: re.Match) -> str:
+        url = m.group(1).strip()
+        return f"[유튜브 링크]{_resolve_youtube_url(url)}[/유튜브 링크]"
+    return _YOUTUBE_TAG_RE.sub(replace, text)
 
 
 def _select_or_create_agent(
@@ -278,4 +348,5 @@ class LettaAgent(AgentInterface):
             elif text_data.source == TextSource.CLIPBOARD:
                 message_parts.append(f"[Clipboard content: {text_data.content}]")
 
-        return "\n".join(message_parts)
+        text = "\n".join(message_parts)
+        return _preprocess_youtube_links(text)

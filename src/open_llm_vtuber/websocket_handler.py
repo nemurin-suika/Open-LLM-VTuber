@@ -376,7 +376,7 @@ class WebSocketHandler:
         import random
         from .live.live_chat_injector import get_immediate_queue, get_priority_queue
 
-        REGULAR_MAX_BUFFER = 10
+        REGULAR_MAX_BUFFER = 5
         PRIORITY_MAX_BUFFER = 10
 
         _OVERLOAD_PATTERNS = [
@@ -576,7 +576,7 @@ class WebSocketHandler:
         async def _consume_regular() -> None:
             rq = get_immediate_queue()
 
-            CHAT_BUFFER_THRESHOLD = 5    # Start buffering live chats when pq depth > this
+            CHAT_BUFFER_THRESHOLD = 3    # Start buffering live chats when pq depth > this
             CHAT_BUFFER_TIMEOUT = 10.0   # Seconds to accumulate before sending batch
             BATCH_HEADER = "[시청자 채팅]"
 
