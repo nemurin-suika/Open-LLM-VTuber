@@ -577,7 +577,7 @@ class WebSocketHandler:
             rq = get_immediate_queue()
 
             CHAT_BUFFER_THRESHOLD = 3    # Start buffering live chats when pq depth > this
-            CHAT_BUFFER_TIMEOUT = 10.0   # Seconds to accumulate before sending batch
+            CHAT_BUFFER_MAX_SIZE = 5     # Flush buffer when this many chats accumulate
             BATCH_HEADER = "[시청자 채팅]"
 
             chat_buffer: list[str] = []  # Accumulates live chat texts during buffer mode
@@ -598,70 +598,56 @@ class WebSocketHandler:
                 await regular_pq.put((msgs, rdy))
                 asyncio.create_task(_capture(batch_item, msgs, rdy))
 
-            async def _buffer_timer_loop() -> None:
-                """Periodically flush the chat buffer even if playback queue stays full."""
-                while True:
-                    await asyncio.sleep(CHAT_BUFFER_TIMEOUT)
-                    if chat_buffer:
-                        logger.debug("[Chat Buffer] Timer flush triggered")
-                        await _flush_chat_buffer()
+            while True:
+                item = await rq.get()
 
-            timer_task = asyncio.create_task(_buffer_timer_loop())
-
-            try:
-                while True:
-                    item = await rq.get()
-
-                    # Incoming overload check (too many items in the incoming queue)
-                    pending = rq.qsize()
-                    if pending > REGULAR_MAX_BUFFER:
-                        drained = 0
-                        while not rq.empty():
-                            try:
-                                rq.get_nowait()
-                                drained += 1
-                            except asyncio.QueueEmpty:
-                                break
-                        await _flush_chat_buffer()  # flush before overload message
-                        overload_text = random.choice(_OVERLOAD_PATTERNS)
-                        item = {"user_input": overload_text, "images": None,
-                                "metadata": {"from_live": True}}
-                        logger.warning(
-                            f"Regular queue overloaded ({pending} pending, "
-                            f"drained {drained}) — prompting overload response"
-                        )
-
-                    # Determine if this is a live chat eligible for buffering
-                    is_live_chat = (
-                        isinstance(item.get("user_input"), str)
-                        and bool(item.get("metadata", {}).get("from_live"))
+                # Incoming overload check (too many items in the incoming queue)
+                pending = rq.qsize()
+                if pending > REGULAR_MAX_BUFFER:
+                    drained = 0
+                    while not rq.empty():
+                        try:
+                            rq.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    await _flush_chat_buffer()  # flush before overload message
+                    overload_text = random.choice(_OVERLOAD_PATTERNS)
+                    item = {"user_input": overload_text, "images": None,
+                            "metadata": {"from_live": True}}
+                    logger.warning(
+                        f"Regular queue overloaded ({pending} pending, "
+                        f"drained {drained}) — prompting overload response"
                     )
 
-                    if is_live_chat and regular_pq.qsize() > CHAT_BUFFER_THRESHOLD:
-                        # Playback queue is deep — buffer this chat instead of
-                        # immediately starting a new LLM call
-                        chat_buffer.append(item["user_input"])
-                        logger.debug(
-                            f"[Chat Buffer] pq={regular_pq.qsize()} "
-                            f"→ buffered ({len(chat_buffer)}개): {item['user_input'][:60]}"
-                        )
-                        continue
+                # Determine if this is a live chat eligible for buffering
+                is_live_chat = (
+                    isinstance(item.get("user_input"), str)
+                    and bool(item.get("metadata", {}).get("from_live"))
+                )
 
-                    # Normal path: flush any pending buffer first so it plays
-                    # before (or merged into) the current item
-                    if chat_buffer:
+                if is_live_chat and regular_pq.qsize() > CHAT_BUFFER_THRESHOLD:
+                    # Playback queue is deep — buffer this chat instead of
+                    # immediately starting a new LLM call
+                    chat_buffer.append(item["user_input"])
+                    logger.debug(
+                        f"[Chat Buffer] pq={regular_pq.qsize()} "
+                        f"→ buffered ({len(chat_buffer)}개): {item['user_input'][:60]}"
+                    )
+                    if len(chat_buffer) >= CHAT_BUFFER_MAX_SIZE:
+                        logger.debug("[Chat Buffer] 최대 크기 도달, flush")
                         await _flush_chat_buffer()
+                    continue
 
-                    msgs: list = []
-                    rdy = asyncio.Event()
-                    await regular_pq.put((msgs, rdy))
-                    asyncio.create_task(_capture(item, msgs, rdy))
-            finally:
-                timer_task.cancel()
-                try:
-                    await timer_task
-                except asyncio.CancelledError:
-                    pass
+                # Normal path: flush any pending buffer first so it plays
+                # before (or merged into) the current item
+                if chat_buffer:
+                    await _flush_chat_buffer()
+
+                msgs: list = []
+                rdy = asyncio.Event()
+                await regular_pq.put((msgs, rdy))
+                asyncio.create_task(_capture(item, msgs, rdy))
 
         # ── run all three concurrently ────────────────────────────────────────
 

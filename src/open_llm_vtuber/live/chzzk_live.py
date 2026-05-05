@@ -9,9 +9,26 @@ immediate_queue and trigger standalone conversation turns.
 """
 
 import asyncio
+import re
 import traceback
 import urllib.parse
+from pathlib import Path
 from typing import Optional
+
+
+def _read_secrets_file() -> dict[str, str]:
+    """~/.secrets 파일에서 export KEY="value" 형식의 값을 읽어 반환."""
+    secrets_path = Path.home() / ".secrets"
+    result: dict[str, str] = {}
+    try:
+        text = secrets_path.read_text()
+        for match in re.finditer(r'export\s+(\w+)=["\']?([^"\';\n]+)["\']?', text):
+            result[match.group(1)] = match.group(2).strip()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"~/.secrets 파일 읽기 실패: {e}")
+    return result
 
 from loguru import logger
 
@@ -76,9 +93,10 @@ class ChzzkLivePlatform:
                 "Install with: uv add chzzkpy"
             )
 
+        secrets = _read_secrets_file()
         self._channel_id = channel_id
-        self._authorization_key = authorization_key or None
-        self._session_key = session_key or None
+        self._authorization_key = authorization_key or secrets.get("NID_AUTH") or None
+        self._session_key = session_key or secrets.get("NID_SESSION") or None
         self._handle_chat = handle_chat
         self._handle_donation = handle_donation
         self._handle_mission = handle_mission
@@ -169,7 +187,7 @@ class ChzzkLivePlatform:
                         event_text = (
                             f"[영상 후원] {username}님이 {amount}원 영상 후원!\n"
                             f"영상 제목: {video_title}\n"
-                            f"유튜브 검색 결과: [유튜브 링크]{search_url}[/유튜브 링크]"
+                            f"유튜브 링크: [유튜브 링크]{search_url}[/유튜브 링크]"
                         )
                         logger.info(f"[Chzzk Video Donation] → LLM: {event_text}")
                     elif self._handle_donation:

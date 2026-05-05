@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import urllib.parse
@@ -69,11 +70,11 @@ def _yt_first_video_url(html: str) -> str:
     return ""
 
 
-def _resolve_youtube_url(url: str) -> str:
+async def _resolve_youtube_url(url: str) -> str:
     """검색 결과 URL이면 첫 번째 영상 URL로 교체, 영상 URL이면 그대로 반환."""
     try:
         if "results" in urllib.parse.urlparse(url).path:
-            html = _yt_fetch(url)
+            html = await asyncio.to_thread(_yt_fetch, url)
             resolved = _yt_first_video_url(html)
             if resolved:
                 logger.info(f"[YouTube] 검색 결과 → 영상 URL: {resolved}")
@@ -83,12 +84,14 @@ def _resolve_youtube_url(url: str) -> str:
     return url
 
 
-def _preprocess_youtube_links(text: str) -> str:
+async def _preprocess_youtube_links(text: str) -> str:
     """[유튜브 링크] 태그 안의 URL을 실제 영상 URL로 교체."""
-    def replace(m: re.Match) -> str:
+    matches = list(_YOUTUBE_TAG_RE.finditer(text))
+    for m in matches:
         url = m.group(1).strip()
-        return f"[유튜브 링크]{_resolve_youtube_url(url)}[/유튜브 링크]"
-    return _YOUTUBE_TAG_RE.sub(replace, text)
+        resolved = await _resolve_youtube_url(url)
+        text = text.replace(m.group(0), f"[유튜브 링크]{resolved}[/유튜브 링크]", 1)
+    return text
 
 
 def _select_or_create_agent(
@@ -296,7 +299,7 @@ class LettaAgent(AgentInterface):
     async def _chat_raw(self, input_data: BatchInput) -> AsyncIterator[str]:
         """Raw token generator. Decorated into self._chat during __init__."""
         input_content: Union[str, List[InputUnionMember1]]
-        text = self._to_text_prompt(input_data)
+        text = await _preprocess_youtube_links(self._to_text_prompt(input_data))
 
         if input_data.images:
             parts: List[InputUnionMember1] = [TextContentParam(type="text", text=text)]
@@ -348,5 +351,4 @@ class LettaAgent(AgentInterface):
             elif text_data.source == TextSource.CLIPBOARD:
                 message_parts.append(f"[Clipboard content: {text_data.content}]")
 
-        text = "\n".join(message_parts)
-        return _preprocess_youtube_links(text)
+        return "\n".join(message_parts)
