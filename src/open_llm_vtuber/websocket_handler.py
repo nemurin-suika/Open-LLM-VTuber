@@ -160,6 +160,10 @@ class WebSocketHandler:
             json.dumps({"type": "full-text", "text": "Connection established"})
         )
 
+        wind_config = None
+        if session_service_context.system_config and session_service_context.system_config.wind_effect:
+            wind_config = session_service_context.system_config.wind_effect.model_dump()
+
         await websocket.send_text(
             json.dumps(
                 {
@@ -168,6 +172,7 @@ class WebSocketHandler:
                     "conf_name": session_service_context.character_config.conf_name,
                     "conf_uid": session_service_context.character_config.conf_uid,
                     "client_uid": client_uid,
+                    "wind_effect_config": wind_config,
                 }
             )
         )

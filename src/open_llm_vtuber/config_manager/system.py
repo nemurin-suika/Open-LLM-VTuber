@@ -1,7 +1,19 @@
 # config_manager/system.py
-from pydantic import Field, model_validator
+from pydantic import Field, model_validator, BaseModel
 from typing import Dict, ClassVar
 from .i18n import I18nMixin, Description
+
+
+class WindEffectConfig(BaseModel):
+    """Wind effect configuration for Live2D physics (hair/cloth flutter)."""
+
+    enabled: bool = Field(True, alias="enabled")
+    max_strength: float = Field(0.5, alias="max_strength")
+    transition_speed: float = Field(0.5, alias="transition_speed")
+    interval_min: float = Field(3.0, alias="interval_min")
+    interval_max: float = Field(8.0, alias="interval_max")
+
+    model_config = {"populate_by_name": True}
 
 
 class SystemConfig(I18nMixin):
@@ -14,6 +26,9 @@ class SystemConfig(I18nMixin):
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")
     enable_screen_capture: bool = Field(True, alias="enable_screen_capture")
+    wind_effect: WindEffectConfig = Field(
+        default_factory=WindEffectConfig, alias="wind_effect"
+    )
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "conf_version": Description(en="Configuration version", zh="配置文件版本"),
