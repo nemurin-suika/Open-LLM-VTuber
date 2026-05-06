@@ -161,8 +161,13 @@ class WebSocketHandler:
         )
 
         wind_config = None
-        if session_service_context.system_config and session_service_context.system_config.wind_effect:
-            wind_config = session_service_context.system_config.wind_effect.model_dump()
+        idle_gaze_config = None
+        if session_service_context.system_config:
+            sc = session_service_context.system_config
+            if sc.wind_effect:
+                wind_config = sc.wind_effect.model_dump()
+            if sc.idle_gaze:
+                idle_gaze_config = sc.idle_gaze.model_dump()
 
         await websocket.send_text(
             json.dumps(
@@ -173,6 +178,7 @@ class WebSocketHandler:
                     "conf_uid": session_service_context.character_config.conf_uid,
                     "client_uid": client_uid,
                     "wind_effect_config": wind_config,
+                    "idle_gaze_config": idle_gaze_config,
                 }
             )
         )

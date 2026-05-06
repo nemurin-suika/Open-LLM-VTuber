@@ -16,6 +16,19 @@ class WindEffectConfig(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class IdleGazeConfig(BaseModel):
+    """Idle gaze wandering configuration for Live2D (active when AI is not responding)."""
+
+    enabled: bool = Field(True, alias="enabled")
+    range_x: float = Field(0.3, alias="range_x")
+    range_y: float = Field(0.2, alias="range_y")
+    transition_speed: float = Field(0.8, alias="transition_speed")
+    interval_min: float = Field(2.0, alias="interval_min")
+    interval_max: float = Field(5.0, alias="interval_max")
+
+    model_config = {"populate_by_name": True}
+
+
 class SystemConfig(I18nMixin):
     """System configuration settings."""
 
@@ -28,6 +41,9 @@ class SystemConfig(I18nMixin):
     enable_screen_capture: bool = Field(True, alias="enable_screen_capture")
     wind_effect: WindEffectConfig = Field(
         default_factory=WindEffectConfig, alias="wind_effect"
+    )
+    idle_gaze: IdleGazeConfig = Field(
+        default_factory=IdleGazeConfig, alias="idle_gaze"
     )
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
