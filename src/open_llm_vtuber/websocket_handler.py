@@ -884,12 +884,18 @@ class WebSocketHandler:
             user_input = data.get("text", "")
             images = data.get("images")
             metadata = {}
+            current_volume = data.get("current_volume")
+            if current_volume is not None:
+                metadata["current_volume"] = current_volume
 
         else:  # mic-audio-end
             user_input = self.received_data_buffers.get(client_uid, np.array([]))
             self.received_data_buffers[client_uid] = np.array([])
             images = data.get("images")
             metadata = {}
+            current_volume = data.get("current_volume")
+            if current_volume is not None:
+                metadata["current_volume"] = current_volume
 
         # Drop screenshot images when enable_screen_capture is False
         screen_capture_enabled = (

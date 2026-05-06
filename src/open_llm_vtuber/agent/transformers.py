@@ -95,6 +95,9 @@ def actions_extractor(live2d_model: Live2dModel):
                         model_scale = live2d_model.extract_model_scale(sentence.text)
                         if model_scale is not None:
                             actions.model_scale = model_scale
+                        volume_adjustment = live2d_model.extract_volume_adjustment(sentence.text)
+                        if volume_adjustment is not None:
+                            actions.volume_adjustment = volume_adjustment
                     yield sentence, actions  # Yield the tuple
                 elif isinstance(item, dict):
                     # Pass through dictionaries

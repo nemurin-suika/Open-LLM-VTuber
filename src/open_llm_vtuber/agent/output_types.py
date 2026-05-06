@@ -13,6 +13,7 @@ class Actions:
     gaze: Optional[Dict[str, float]] = None
     movement: Optional[Dict[str, float]] = None  # {"x": NDC_x, "y": NDC_y}
     model_scale: Optional[float] = None           # multiplier: 1.0=normal
+    volume_adjustment: Optional[int] = None       # ±5 per keyword (0-100 scale)
 
     def to_dict(self) -> dict:
         """Convert Actions object to a dictionary for JSON serialization"""

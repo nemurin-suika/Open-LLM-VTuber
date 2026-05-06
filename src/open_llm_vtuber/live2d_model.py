@@ -43,6 +43,12 @@ SCALE_KEYWORDS: Dict[str, float] = {
     "scale_normal": 1.0,
 }
 
+# Volume adjustment per keyword (percentage points, 0–100 scale)
+VOLUME_KEYWORDS: Dict[str, int] = {
+    "volume_up":   5,
+    "volume_down": -5,
+}
+
 # This class will only prepare the payload for the live2d model
 # the process of sending the payload should be done by the caller
 # This class is **Not responsible** for sending the payload to the server
@@ -544,3 +550,31 @@ class Live2dModel:
                 target_str = target_str[:start_index] + target_str[end_index:]
                 lower_str = lower_str[:start_index] + lower_str[end_index:]
         return target_str
+
+    def extract_volume_adjustment(self, text: str) -> Optional[int]:
+        """Extract cumulative volume adjustment from [volume_up] / [volume_down] tags.
+
+        Each tag adds ±5 to the total. Multiple tags in the same sentence accumulate.
+        Returns the total integer adjustment, or None if no volume tag is found.
+        """
+        text_lower = text.lower()
+        total = 0
+        found = False
+        i = 0
+        while i < len(text_lower):
+            if text_lower[i] == "[":
+                for keyword, delta in VOLUME_KEYWORDS.items():
+                    tag = f"[{keyword}]"
+                    if text_lower[i : i + len(tag)] == tag:
+                        total += delta
+                        found = True
+                        i += len(tag) - 1
+                        break
+            i += 1
+        return total if found else None
+
+    def remove_volume_keywords(self, text: str) -> str:
+        """Remove [volume_up] and [volume_down] tags from text."""
+        for keyword in VOLUME_KEYWORDS:
+            text = re.sub(re.escape(f"[{keyword}]"), "", text, flags=re.IGNORECASE)
+        return text

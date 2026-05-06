@@ -76,6 +76,12 @@ async def process_single_conversation(
         _now = _dt.now().strftime("%Y-%m-%d %H:%M")
         input_text = f"[현재 시각: {_now}]\n{input_text}" if input_text else f"[현재 시각: {_now}]"
 
+        # Inject current TTS volume so the LLM knows the baseline for [volume_up/down]
+        _current_volume = metadata.get("current_volume") if metadata else None
+        if _current_volume is not None:
+            _vol_line = f"[현재 TTS 볼륨: {_current_volume}%]"
+            input_text = f"{_vol_line}\n{input_text}" if input_text else _vol_line
+
         # Inject real-time viewer count when the stream is live (count > 0)
         try:
             from ..live.live_chat_injector import get_viewer_count as _get_viewer_count
