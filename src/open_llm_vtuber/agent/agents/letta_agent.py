@@ -207,7 +207,12 @@ def _confirm_and_update(
         print("  y 또는 n을 입력하세요.")
 
 
-_REQUIRED_TOOLS = ["core_memory_append", "core_memory_replace"]
+_REQUIRED_TOOLS = [
+    "core_memory_append",
+    "core_memory_replace",
+    "archival_memory_insert",
+    "archival_memory_search",
+]
 _REQUIRED_BLOCKS = ["human", "persona"]
 
 
