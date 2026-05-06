@@ -435,6 +435,7 @@ class WebSocketHandler:
                     f"({len(captured)} msgs, {real_audio} audio chunks)"
                 )
             except asyncio.CancelledError:
+                ready.set()
                 raise
             except Exception as e:
                 logger.error(f"Live capture error: {e}")
@@ -539,7 +540,11 @@ class WebSocketHandler:
             nonlocal _play_idx
             while True:
                 messages, ready = await _next_slot(priority_pq, regular_pq)
-                await ready.wait()
+                try:
+                    await asyncio.wait_for(ready.wait(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >120s) — skipping")
+                    continue
                 _play_idx += 1
                 idx = _play_idx
                 logger.info(f"[TTS-DBG #{idx}] ▶ replay start  (pq_regular={regular_pq.qsize()} pq_priority={priority_pq.qsize()})")

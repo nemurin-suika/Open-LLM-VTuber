@@ -144,6 +144,7 @@ def _select_or_create_agent(
                 print(f"  선택됨: {selected.id}  ({selected.name})")
                 print(_SEP + "\n")
                 _confirm_and_update(sync_client, selected.id, system_prompt, model, embedding, context_window_limit)
+                _ensure_core_memory(sync_client, selected.id)
                 return selected.id
             print(f"  0 ~ {len(agents)} 사이의 번호를 입력하세요.")
         except ValueError:
@@ -206,6 +207,33 @@ def _confirm_and_update(
         print("  y 또는 n을 입력하세요.")
 
 
+_REQUIRED_TOOLS = ["core_memory_append", "core_memory_replace"]
+_REQUIRED_BLOCKS = ["human", "persona"]
+
+
+def _ensure_core_memory(sync_client: Letta, agent_id: str) -> None:
+    """core_memory 도구와 블록이 없으면 자동으로 추가."""
+    # 도구 확인 및 추가
+    existing_tools = {t.name for t in sync_client.agents.tools.list(agent_id=agent_id)}
+    all_tools = list(sync_client.tools.list())
+    for tool_name in _REQUIRED_TOOLS:
+        if tool_name not in existing_tools:
+            tool = next((t for t in all_tools if t.name == tool_name), None)
+            if tool:
+                sync_client.agents.tools.attach(tool.id, agent_id=agent_id)
+                logger.info(f"[core_memory] 도구 추가: {tool_name}")
+            else:
+                logger.warning(f"[core_memory] 도구를 찾을 수 없음: {tool_name}")
+
+    # 블록 확인 및 추가
+    existing_labels = {b.label for b in sync_client.agents.blocks.list(agent_id=agent_id)}
+    for label in _REQUIRED_BLOCKS:
+        if label not in existing_labels:
+            block = sync_client.blocks.create(label=label, value="", limit=5000)
+            sync_client.agents.blocks.attach(block.id, agent_id=agent_id)
+            logger.info(f"[core_memory] 블록 추가: {label}")
+
+
 def _create_new_agent(
     sync_client: Letta,
     system_prompt: str,
@@ -214,21 +242,18 @@ def _create_new_agent(
     context_window_limit: Optional[int] = None,
 ) -> str:
     """Create a new agent and return its ID."""
+    kwargs = dict(
+        model=model,
+        embedding=embedding,
+        system=system_prompt,
+        name="Open-LLM-VTuber",
+        memory_blocks=[{"label": label, "value": ""} for label in _REQUIRED_BLOCKS],
+        tools=_REQUIRED_TOOLS,
+    )
     if context_window_limit is not None:
-        agent = sync_client.agents.create(
-            model=model,
-            embedding=embedding,
-            system=system_prompt,
-            name="Open-LLM-VTuber",
-            context_window_limit=context_window_limit,
-        )
-    else:
-        agent = sync_client.agents.create(
-            model=model,
-            embedding=embedding,
-            system=system_prompt,
-            name="Open-LLM-VTuber",
-        )
+        kwargs["context_window_limit"] = context_window_limit
+
+    agent = sync_client.agents.create(**kwargs)
     logger.info(f"새 Letta 에이전트 생성 완료: {agent.id}")
     print(f"  새 에이전트 생성 완료: {agent.id}")
     print(_SEP + "\n")
