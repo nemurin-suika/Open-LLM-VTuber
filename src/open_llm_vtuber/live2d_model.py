@@ -45,8 +45,8 @@ SCALE_KEYWORDS: Dict[str, float] = {
 
 # Volume adjustment per keyword (percentage points, 0–100 scale)
 VOLUME_KEYWORDS: Dict[str, int] = {
-    "volume_up":   5,
-    "volume_down": -5,
+    "volume_up":   10,
+    "volume_down": -10,
 }
 
 # This class will only prepare the payload for the live2d model

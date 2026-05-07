@@ -98,6 +98,7 @@ def actions_extractor(live2d_model: Live2dModel):
                         volume_adjustment = live2d_model.extract_volume_adjustment(sentence.text)
                         if volume_adjustment is not None:
                             actions.volume_adjustment = volume_adjustment
+                            logger.debug(f"[volume] extracted {volume_adjustment:+d} from: {sentence.text!r}")
                     yield sentence, actions  # Yield the tuple
                 elif isinstance(item, dict):
                     # Pass through dictionaries

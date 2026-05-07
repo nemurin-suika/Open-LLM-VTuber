@@ -552,9 +552,9 @@ class WebSocketHandler:
             while True:
                 messages, ready = await _next_slot(priority_pq, regular_pq)
                 try:
-                    await asyncio.wait_for(ready.wait(), timeout=120.0)
+                    await asyncio.wait_for(ready.wait(), timeout=300.0)
                 except asyncio.TimeoutError:
-                    logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >120s) — skipping")
+                    logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >300s) — skipping")
                     continue
                 _play_idx += 1
                 idx = _play_idx
