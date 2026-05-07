@@ -512,7 +512,24 @@ class SentenceDivider:
             if original_buffer_len > 0:
                 current_tags = self._get_current_tags()
 
-                # Handle first sentence with comma if enabled
+                # Process normal sentences based on end punctuation (checked first
+                # so "왔어!" is yielded immediately rather than waiting for a comma)
+                if contains_end_punctuation(self._buffer):
+                    sentences, remaining = self._segment_text(self._buffer)
+                    if sentences:  # Only process if segmentation yielded sentences
+                        self._buffer = remaining
+                        self._is_first_sentence = False
+                        processed_something = True
+                        for sentence in sentences:
+                            if sentence.strip():
+                                yield SentenceWithTags(
+                                    text=sentence.strip(),
+                                    tags=current_tags or [TagInfo("", TagState.NONE)],
+                                )
+                        continue  # Restart processing loop
+
+                # No end punctuation yet — fall back to comma split for faster
+                # first response while the LLM is still streaming tokens
                 if (
                     self._is_first_sentence
                     and self.faster_first_response
@@ -527,21 +544,6 @@ class SentenceDivider:
                         self._buffer = remaining
                         self._is_first_sentence = False
                         processed_something = True
-                        continue  # Restart processing loop
-
-                # Process normal sentences based on end punctuation
-                if contains_end_punctuation(self._buffer):
-                    sentences, remaining = self._segment_text(self._buffer)
-                    if sentences:  # Only process if segmentation yielded sentences
-                        self._buffer = remaining
-                        self._is_first_sentence = False
-                        processed_something = True
-                        for sentence in sentences:
-                            if sentence.strip():
-                                yield SentenceWithTags(
-                                    text=sentence.strip(),
-                                    tags=current_tags or [TagInfo("", TagState.NONE)],
-                                )
                         continue  # Restart processing loop
 
             # If we reached here without processing anything, break the loop
