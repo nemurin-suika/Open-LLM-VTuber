@@ -73,7 +73,9 @@ async def process_single_conversation(
 
         # Inject current date/time so the LLM always knows when the conversation is
         from datetime import datetime as _dt
-        _now = _dt.now().strftime("%Y-%m-%d %H:%M")
+        _WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
+        _dt_now = _dt.now()
+        _now = _dt_now.strftime("%Y-%m-%d") + f" ({_WEEKDAYS[_dt_now.weekday()]})" + _dt_now.strftime(" %H:%M")
         input_text = f"[현재 시각: {_now}]\n{input_text}" if input_text else f"[현재 시각: {_now}]"
 
         # Inject current TTS volume so the LLM knows the baseline for [volume_up/down]
