@@ -120,3 +120,12 @@ def set_viewer_count(count: int) -> None:
 def get_viewer_count() -> int:
     """Return the last known viewer count. -1 means not yet fetched."""
     return _viewer_count
+
+
+# ── Pending chat check ────────────────────────────────────────────────────────
+
+def has_pending_chats() -> bool:
+    """Return True if there are viewer chats waiting in the immediate queue."""
+    if _immediate_queue is None:
+        return False
+    return not _immediate_queue.empty()
