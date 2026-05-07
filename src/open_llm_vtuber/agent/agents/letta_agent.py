@@ -295,7 +295,7 @@ class LettaAgent(AgentInterface):
         if not id:
             id = _select_or_create_agent(self.url, system_prompt, model, embedding, context_window_limit)
 
-        self.client = AsyncLetta(base_url=self.url)
+        self.client = AsyncLetta(base_url=self.url, timeout=600)
         self.id = id
         logger.info(f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}")
 
