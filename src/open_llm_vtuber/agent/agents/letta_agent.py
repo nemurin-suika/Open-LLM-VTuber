@@ -355,6 +355,7 @@ class LettaAgent(AgentInterface):
             agent_id=self.id,
             streaming=True,  # type: ignore[call-overload]
             stream_tokens=True,
+            background=True,  # Redis 백업: 멀티 워커에서도 LLM 1회만 실행
             input=input_content,
         )
 
