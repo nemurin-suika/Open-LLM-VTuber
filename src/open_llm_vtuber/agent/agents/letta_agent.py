@@ -94,6 +94,62 @@ async def _preprocess_youtube_links(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# 일반 URL 분류 및 태그: [이미지 링크] / [웹 링크]
+# ---------------------------------------------------------------------------
+_IMG_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"})
+_IMG_CONTENT_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "image/svg+xml", "image/bmp", "image/tiff",
+})
+_ALL_URL_RE = re.compile(r"https?://[^\s\[\]<>\"']+")
+_TAGGED_URL_RE = re.compile(
+    r"\[(?:유튜브|이미지|웹) 링크\](https?://[^\[\]]+?)\[/(?:유튜브|이미지|웹) 링크\]"
+)
+
+
+def _head_content_type(url: str, timeout: int = 10) -> str:
+    """HEAD 요청으로 Content-Type 반환. 실패 시 빈 문자열."""
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=_YT_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.headers.get("Content-Type", "").lower()
+    except Exception:
+        return ""
+
+
+async def _classify_url(url: str) -> str:
+    """URL 콘텐츠 타입 분류: 'image' | 'web'. 타임아웃 10초."""
+    ct = await asyncio.to_thread(_head_content_type, url)
+    if any(img_ct in ct for img_ct in _IMG_CONTENT_TYPES):
+        return "image"
+    path = url.lower().split("?")[0].split("#")[0]
+    if any(path.endswith(ext) for ext in _IMG_EXTENSIONS):
+        return "image"
+    return "web"
+
+
+async def _tag_general_urls(text: str) -> str:
+    """[유튜브/이미지/웹 링크] 외의 URL을 [이미지 링크] 또는 [웹 링크] 태그로 감쌈."""
+    already_tagged = {m.group(1).strip() for m in _TAGGED_URL_RE.finditer(text)}
+    to_process = [
+        m.group(0) for m in _ALL_URL_RE.finditer(text)
+        if m.group(0) not in already_tagged
+    ]
+    unique_urls = list(dict.fromkeys(to_process))
+    if not unique_urls:
+        return text
+
+    types = await asyncio.gather(*[_classify_url(url) for url in unique_urls])
+    type_map = dict(zip(unique_urls, types))
+
+    for url in to_process:
+        tag = "이미지" if type_map[url] == "image" else "웹"
+        text = text.replace(url, f"[{tag} 링크]{url}[/{tag} 링크]", 1)
+
+    return text
+
+
 def _select_or_create_agent(
     base_url: str,
     system_prompt: str,
@@ -329,7 +385,9 @@ class LettaAgent(AgentInterface):
     async def _chat_raw(self, input_data: BatchInput) -> AsyncIterator[str]:
         """Raw token generator. Decorated into self._chat during __init__."""
         input_content: Union[str, List[InputUnionMember1]]
-        text = await _preprocess_youtube_links(self._to_text_prompt(input_data))
+        text = self._to_text_prompt(input_data)
+        text = await _preprocess_youtube_links(text)
+        text = await _tag_general_urls(text)
 
         if input_data.images:
             parts: List[InputUnionMember1] = [TextContentParam(type="text", text=text)]
