@@ -58,6 +58,8 @@ async def put_immediate(item) -> None:
     """
     if isinstance(item, str):
         item = {"user_input": _tag_youtube_links(item), "images": None, "metadata": {"from_live": True}}
+    elif isinstance(item, dict) and isinstance(item.get("user_input"), str):
+        item = {**item, "user_input": _tag_youtube_links(item["user_input"])}
     await get_immediate_queue().put(item)
 
 
