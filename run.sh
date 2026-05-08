@@ -94,9 +94,29 @@ except Exception as e:
     system_prompt = None
 
 # ── 에이전트 찾기 또는 생성 ───────────────────────────────────────────────────
+import re as _re
+
+# 다른 프로젝트(치지직, 트위터)가 추가한 커스텀 섹션 태그
+_CUSTOM_SECTION_RE = _re.compile(
+    r'\[(?:치지직 방송 보기|트위터)\].*?\[/(?:치지직 방송 보기|트위터)\]',
+    _re.DOTALL,
+)
+
 client = Letta(base_url=base_url)
 agents = list(client.agents.list())
 agent  = next((a for a in agents if a.name == AGENT_NAME), None)
+
+# 기존 에이전트의 커스텀 섹션([치지직 방송 보기], [트위터])을 새 시스템 프롬프트에 보존
+if agent and system_prompt is not None:
+    try:
+        agent_detail = client.agents.retrieve(agent.id)
+        current_system = getattr(agent_detail, "system", "") or ""
+        custom_sections = _CUSTOM_SECTION_RE.findall(current_system)
+        if custom_sections:
+            system_prompt = system_prompt.rstrip() + "\n\n" + "\n\n".join(custom_sections)
+            print(f"[Letta] 커스텀 섹션 보존: {[s.splitlines()[0] for s in custom_sections]}")
+    except Exception as e:
+        print(f"[Letta] 커스텀 섹션 보존 실패 (무시): {e}")
 
 update_kwargs = dict(model=model, embedding=emb, context_window_limit=ctx_lim)
 if system_prompt is not None:
