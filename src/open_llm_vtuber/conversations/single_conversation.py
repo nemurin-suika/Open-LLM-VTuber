@@ -191,6 +191,9 @@ async def process_single_conversation(
             # full_response will contain partial response before error
         # --- End processing agent response ---
 
+        if not full_response and not tts_manager.task_list:
+            logger.warning("⚠️ LLM 응답 없음: Letta가 아무 내용도 반환하지 않았습니다. Letta 서버 로그를 확인하세요.")
+
         # Wait for any pending TTS tasks.
         # First gather() waits for all TTS audio files to be generated.
         # Then wait_for_delivery() waits for _sender_task to finish sending ALL

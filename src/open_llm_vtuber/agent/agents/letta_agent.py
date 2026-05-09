@@ -1,8 +1,10 @@
 import asyncio
+import base64 as _base64
 import json
 import re
 import urllib.parse
 import urllib.request
+import uuid as _uuid
 from typing import AsyncIterator, Dict, Any, List, Optional, Union
 
 from loguru import logger
@@ -390,22 +392,20 @@ class LettaAgent(AgentInterface):
         text = await _tag_general_urls(text)
 
         if input_data.images:
-            parts: List[InputUnionMember1] = [TextContentParam(type="text", text=text)]
+            screenshot_tags: List[str] = []
             for img in input_data.images:
                 img_data = img.data
                 if img_data.startswith("data:") and "," in img_data:
                     img_data = img_data.split(",", 1)[1]
-                parts.append(
-                    ImageContentParam(
-                        type="image",
-                        source=SourceBase64Image(
-                            type="base64",
-                            data=img_data,
-                            media_type=img.mime_type,
-                        ),
-                    )
+                source = img.source.value if hasattr(img.source, "value") else str(img.source)
+                temp_path = f"/tmp/claude_screenshot_{_uuid.uuid4().hex}.jpg"
+                await asyncio.to_thread(
+                    lambda p=temp_path, d=img_data: open(p, "wb").write(_base64.b64decode(d))
                 )
-            input_content = parts
+                screenshot_tags.append(f"[스크린샷 source={source}]{temp_path}[/스크린샷]")
+                logger.info(f"[Screenshot] temp 저장: {temp_path} (source={source})")
+            text = "\n".join(screenshot_tags) + "\n" + text
+            input_content = text
         else:
             input_content = text
 
@@ -417,6 +417,7 @@ class LettaAgent(AgentInterface):
             input=input_content,
         )
 
+        _yielded = 0
         async for token in stream:
             if token.message_type == "reasoning_message":
                 continue
@@ -426,10 +427,21 @@ class LettaAgent(AgentInterface):
                     text = "".join(part.text for part in content)
                 else:
                     text = content
+            elif token.message_type == "letta_error":
+                logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
+                continue
+            elif token.message_type in ("stop_reason", "usage_statistics", "ping",
+                                        "tool_call_message", "tool_return_message"):
+                continue
             else:
+                logger.debug(f"[Letta] 알 수 없는 토큰 타입 무시: {token.message_type}")
                 continue
 
+            _yielded += 1
             yield text
+
+        if _yielded == 0:
+            logger.warning("[Letta] 응답 토큰 없음 — LLM이 아무것도 반환하지 않았습니다. Letta 서버 로그를 확인하세요.")
 
     def _to_text_prompt(self, input_data: BatchInput) -> str:
         message_parts = []

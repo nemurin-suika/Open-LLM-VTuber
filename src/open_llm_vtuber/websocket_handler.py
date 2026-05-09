@@ -390,12 +390,17 @@ class WebSocketHandler:
         REGULAR_MAX_BUFFER = 5
         PRIORITY_MAX_BUFFER = 10
 
-        _OVERLOAD_PATTERNS = [
-            "[오버로드] 채팅이 갑자기 너무 많이 쏟아져서 다 읽기가 힘들어. 시청자들한테 너무 많이 온다고 자연스럽게 반응해줘.",
-            "[오버로드] 채팅 화력이 감당이 안 될 정도로 쏟아지고 있어. 당황하거나 압도당한 느낌으로 짧게 반응해줘.",
-            "[오버로드] 채팅이 한꺼번에 너무 많이 들어와서 멈춰야 했어. 읽다가 뒤처진 상황에 맞게 반응해줘.",
-            "[오버로드] 갑자기 채팅 폭주가 왔어. 시청자들 화력 칭찬하면서 좀 진정시켜달라고 해줘.",
-            "[오버로드] 채팅이 너무 빠르게 올라와서 하나도 못 읽겠어. 이 상황 솔직하게 토로해줘.",
+        # 오버로드 시 LLM 없이 즉시 TTS로 출력하는 고정 대사
+        _OVERLOAD_LINES = [
+            "야 잠깐만, 채팅 너무 빨라! 눈이 빙글빙글 돌아간다고!",
+            "다들 천천히 좀! 나 AI지만 눈은 두 개밖에 없거든?!",
+            "헉, 채팅 폭주다! 좀만 기다려, 지금 머리가 과열 중이야!",
+            "와 채팅 속도 미쳤어. 잠깐 숨 좀 돌리자!",
+            "다들 손가락이 왜 그렇게 빨라?! 나 읽는 속도가 안 따라가!",
+            "아아아 너무 많아! 좀만 천천히, 나도 다 읽고 싶단 말이야!",
+            "잠깐 타임! 채팅이 폭포수처럼 쏟아지고 있어!",
+            "다들 흥분한 거 알겠는데, 나 지금 눈알 풀 가동 중이거든?!",
+            "채팅 속도 왜 이래! 좀만 살살, 내 처리 속도에도 한계가 있다고!",
         ]
 
         # Ordered playback queues: each slot is (messages: list, ready: Event)
@@ -452,6 +457,81 @@ class WebSocketHandler:
                 logger.error(f"Live capture error: {e}")
             finally:
                 ready.set()
+
+        async def _capture_direct_tts(text: str, messages: list, ready: asyncio.Event) -> None:
+            """LLM 없이 TTS를 직접 생성해 messages에 채운다 (오버로드 즉시 응답용)."""
+            try:
+                if not self.client_connections:
+                    return
+                client_uid = next(reversed(self.client_connections))
+                context = self.client_contexts.get(client_uid)
+                if not context:
+                    return
+
+                from .conversations.tts_manager import TTSTaskManager
+                from .agent.output_types import DisplayText, Actions
+
+                captured: list[str] = []
+
+                async def _cap_send(raw: str) -> None:
+                    captured.append(raw)
+
+                await _cap_send(json.dumps({"type": "control", "text": "conversation-chain-start"}))
+                await _cap_send(json.dumps({"type": "full-text", "text": text}))
+
+                tts_manager = TTSTaskManager()
+                display = DisplayText(
+                    text=text,
+                    name=context.character_config.character_name,
+                    avatar=context.character_config.avatar,
+                )
+                await tts_manager.speak(
+                    tts_text=text,
+                    display_text=display,
+                    actions=Actions(),
+                    live2d_model=context.live2d_model,
+                    tts_engine=context.tts_engine,
+                    websocket_send=_cap_send,
+                )
+                if tts_manager.task_list:
+                    await asyncio.gather(*tts_manager.task_list)
+                    await tts_manager.wait_for_delivery()
+                    await _cap_send(json.dumps({"type": "backend-synth-complete"}))
+
+                await _cap_send(json.dumps({"type": "force-new-message"}))
+                await _cap_send(json.dumps({"type": "control", "text": "conversation-chain-end"}))
+                messages.extend(captured)
+            except asyncio.CancelledError:
+                ready.set()
+                raise
+            except Exception as e:
+                logger.error(f"Direct TTS overload error: {e}")
+            finally:
+                ready.set()
+
+        async def _notify_llm_skipped(drained_count: int) -> None:
+            """채팅 스킵 사실을 Letta 메모리에 조용히 기록한다 (TTS 없음)."""
+            try:
+                if not self.client_connections:
+                    return
+                client_uid = next(reversed(self.client_connections))
+                context = self.client_contexts.get(client_uid)
+                if not context:
+                    return
+                agent = context.agent_engine
+                if not (hasattr(agent, "client") and hasattr(agent, "id")):
+                    return
+                notification = (
+                    f"[시스템] 채팅 폭주로 인해 {drained_count}개의 채팅이 스킵되어 읽지 못했습니다."
+                )
+                await agent.client.agents.messages.create(
+                    agent_id=agent.id,
+                    streaming=False,  # type: ignore[call-overload]
+                    input=notification,
+                )
+                logger.debug(f"[Overload] Letta에 {drained_count}개 스킵 알림 완료")
+            except Exception as e:
+                logger.debug(f"[Overload] Letta 알림 실패 (무시): {e}")
 
         async def _replay(messages: list, idx: int = 0) -> None:
             """Send captured messages with progressive audio delivery.
@@ -594,11 +674,17 @@ class WebSocketHandler:
 
             CHAT_BUFFER_THRESHOLD = 3    # Start buffering live chats when pq depth > this
             CHAT_BUFFER_MAX_SIZE = 5     # Flush buffer when this many chats accumulate
+            CHAT_BUFFER_TIMEOUT = 5.0    # Flush buffer after this many seconds
             BATCH_HEADER = "[시청자 채팅]"
 
             chat_buffer: list[str] = []  # Accumulates live chat texts during buffer mode
+            _buffer_timer: asyncio.Task | None = None
 
             async def _flush_chat_buffer() -> None:
+                nonlocal _buffer_timer
+                if _buffer_timer and not _buffer_timer.done():
+                    _buffer_timer.cancel()
+                _buffer_timer = None
                 if not chat_buffer:
                     return
                 texts = list(chat_buffer)
@@ -614,6 +700,12 @@ class WebSocketHandler:
                 await regular_pq.put((msgs, rdy))
                 asyncio.create_task(_capture(batch_item, msgs, rdy))
 
+            async def _buffer_timeout() -> None:
+                await asyncio.sleep(CHAT_BUFFER_TIMEOUT)
+                if chat_buffer:
+                    logger.debug("[Chat Buffer] 5초 타임아웃, flush")
+                    await _flush_chat_buffer()
+
             while True:
                 item = await rq.get()
 
@@ -627,14 +719,17 @@ class WebSocketHandler:
                             drained += 1
                         except asyncio.QueueEmpty:
                             break
-                    await _flush_chat_buffer()  # flush before overload message
-                    overload_text = random.choice(_OVERLOAD_PATTERNS)
-                    item = {"user_input": overload_text, "images": None,
-                            "metadata": {"from_live": True}}
+                    await _flush_chat_buffer()
+                    overload_line = random.choice(_OVERLOAD_LINES)
                     logger.warning(
-                        f"Regular queue overloaded ({pending} pending, "
-                        f"drained {drained}) — prompting overload response"
+                        f"Regular queue overloaded ({pending} pending, drained {drained})"
+                        f" — direct TTS: {overload_line[:40]}"
                     )
+                    msgs, rdy = [], asyncio.Event()
+                    await regular_pq.put((msgs, rdy))
+                    asyncio.create_task(_capture_direct_tts(overload_line, msgs, rdy))
+                    asyncio.create_task(_notify_llm_skipped(drained))
+                    continue
 
                 # Determine if this is a live chat eligible for buffering
                 is_live_chat = (
@@ -645,11 +740,14 @@ class WebSocketHandler:
                 if is_live_chat and regular_pq.qsize() > CHAT_BUFFER_THRESHOLD:
                     # Playback queue is deep — buffer this chat instead of
                     # immediately starting a new LLM call
+                    is_first = len(chat_buffer) == 0
                     chat_buffer.append(item["user_input"])
                     logger.debug(
                         f"[Chat Buffer] pq={regular_pq.qsize()} "
                         f"→ buffered ({len(chat_buffer)}개): {item['user_input'][:60]}"
                     )
+                    if is_first:
+                        _buffer_timer = asyncio.create_task(_buffer_timeout())
                     if len(chat_buffer) >= CHAT_BUFFER_MAX_SIZE:
                         logger.debug("[Chat Buffer] 최대 크기 도달, flush")
                         await _flush_chat_buffer()
