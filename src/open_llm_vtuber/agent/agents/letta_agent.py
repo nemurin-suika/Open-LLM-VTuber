@@ -97,7 +97,7 @@ async def _preprocess_youtube_links(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 일반 URL 분류 및 태그: [이미지 링크] / [웹 링크]
+# 일반 URL 분류 및 태그: [유튜브 링크] / [이미지 링크] / [웹 링크]
 # ---------------------------------------------------------------------------
 _IMG_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"})
 _IMG_CONTENT_TYPES = frozenset({
@@ -108,6 +108,13 @@ _ALL_URL_RE = re.compile(r"https?://[^\s\[\]<>\"']+")
 _TAGGED_URL_RE = re.compile(
     r"\[(?:유튜브|이미지|웹) 링크\](https?://[^\[\]]+?)\[/(?:유튜브|이미지|웹) 링크\]"
 )
+
+# YouTube 영상 URL 패턴 (watch?v= 또는 youtu.be/ 형식만)
+_YT_VIDEO_RE = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com/watch(?:\?[^\s]*)?|youtu\.be/)[\w\-]+"
+)
+# YouTube 도메인 전체 (채널, 게시물, 쇼츠 등 포함)
+_YT_DOMAIN_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/")
 
 
 def _head_content_type(url: str, timeout: int = 10) -> str:
@@ -121,7 +128,13 @@ def _head_content_type(url: str, timeout: int = 10) -> str:
 
 
 async def _classify_url(url: str) -> str:
-    """URL 콘텐츠 타입 분류: 'image' | 'web'. 타임아웃 10초."""
+    """URL 콘텐츠 타입 분류: 'youtube_video' | 'image' | 'web'.
+
+    YouTube 도메인은 HEAD 요청 없이 패턴으로 직접 분류해
+    영상 URL과 채널/게시물/쇼츠를 정확히 구분한다.
+    """
+    if _YT_DOMAIN_RE.match(url):
+        return "youtube_video" if _YT_VIDEO_RE.match(url) else "web"
     ct = await asyncio.to_thread(_head_content_type, url)
     if any(img_ct in ct for img_ct in _IMG_CONTENT_TYPES):
         return "image"
@@ -132,7 +145,13 @@ async def _classify_url(url: str) -> str:
 
 
 async def _tag_general_urls(text: str) -> str:
-    """[유튜브/이미지/웹 링크] 외의 URL을 [이미지 링크] 또는 [웹 링크] 태그로 감쌈."""
+    """[유튜브/이미지/웹 링크] 외의 URL을 적절한 태그로 감쌈.
+
+    - YouTube 영상 URL → [유튜브 링크]
+    - YouTube 채널/게시물 등 → [웹 링크]
+    - 이미지 URL → [이미지 링크]
+    - 그 외 → [웹 링크]
+    """
     already_tagged = {m.group(1).strip() for m in _TAGGED_URL_RE.finditer(text)}
     to_process = [
         m.group(0) for m in _ALL_URL_RE.finditer(text)
@@ -146,8 +165,13 @@ async def _tag_general_urls(text: str) -> str:
     type_map = dict(zip(unique_urls, types))
 
     for url in to_process:
-        tag = "이미지" if type_map[url] == "image" else "웹"
-        text = text.replace(url, f"[{tag} 링크]{url}[/{tag} 링크]", 1)
+        url_type = type_map[url]
+        if url_type == "youtube_video":
+            text = text.replace(url, f"[유튜브 링크]{url}[/유튜브 링크]", 1)
+        elif url_type == "image":
+            text = text.replace(url, f"[이미지 링크]{url}[/이미지 링크]", 1)
+        else:
+            text = text.replace(url, f"[웹 링크]{url}[/웹 링크]", 1)
 
     return text
 
