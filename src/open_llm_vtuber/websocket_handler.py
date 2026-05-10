@@ -628,19 +628,95 @@ class WebSocketHandler:
         _play_idx = 0  # monotonic counter to correlate log lines per output
 
         async def _player() -> None:
+            """먼저 완성된 슬롯을 먼저 재생한다 (completion-order playback)."""
             nonlocal _play_idx
+            # 현재 LLM+TTS가 진행 중인 슬롯 풀 (완성되지 않은 것들)
+            pending: list[tuple[list, asyncio.Event]] = []
+
             while True:
-                messages, ready = await _next_slot(priority_pq, regular_pq)
-                try:
-                    await asyncio.wait_for(ready.wait(), timeout=300.0)
-                except asyncio.TimeoutError:
-                    logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >300s) — skipping")
+                # ── 큐에서 즉시 꺼낼 수 있는 슬롯을 모두 pending에 추가 ──────────
+                while True:
+                    try:
+                        pending.insert(0, priority_pq.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                while True:
+                    try:
+                        pending.append(regular_pq.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+
+                # ── pending이 비어있으면 새 슬롯이 올 때까지 블록 ─────────────────
+                if not pending:
+                    get_prio = asyncio.create_task(priority_pq.get())
+                    get_reg  = asyncio.create_task(regular_pq.get())
+                    done, _ = await asyncio.wait(
+                        {get_prio, get_reg}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for t in {get_prio, get_reg} - done:
+                        t.cancel()
+                        try:
+                            await t
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    if get_prio in done:
+                        pending.insert(0, get_prio.result())
+                        if get_reg in done:
+                            pending.append(get_reg.result())
+                    else:
+                        pending.append(get_reg.result())
                     continue
+
+                # ── 이미 완성된 슬롯이 있는지 즉시 확인 ─────────────────────────
+                ready_idx = next(
+                    (i for i, (_, rdy) in enumerate(pending) if rdy.is_set()), None
+                )
+
+                if ready_idx is None:
+                    # 아직 완성된 슬롯 없음 — 첫 완성 또는 새 슬롯 도착 대기
+                    ready_waits = [asyncio.create_task(rdy.wait()) for _, rdy in pending]
+                    get_prio    = asyncio.create_task(priority_pq.get())
+                    get_reg     = asyncio.create_task(regular_pq.get())
+
+                    all_tasks = ready_waits + [get_prio, get_reg]
+                    done, _ = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+                    for t in all_tasks:
+                        if t not in done:
+                            t.cancel()
+                            try:
+                                await t
+                            except (asyncio.CancelledError, Exception):
+                                pass
+
+                    # 새로 도착한 슬롯 추가
+                    if get_prio in done:
+                        try:
+                            pending.insert(0, get_prio.result())
+                        except Exception:
+                            pass
+                    if get_reg in done:
+                        try:
+                            pending.append(get_reg.result())
+                        except Exception:
+                            pass
+
+                    ready_idx = next(
+                        (i for i, t in enumerate(ready_waits) if t in done), None
+                    )
+                    if ready_idx is None:
+                        continue  # 새 슬롯만 도착, 다시 루프
+
+                # ── 완성된 슬롯 재생 ──────────────────────────────────────────────
+                msgs, _ = pending.pop(ready_idx)
                 _play_idx += 1
                 idx = _play_idx
-                logger.info(f"[TTS-DBG #{idx}] ▶ replay start  (pq_regular={regular_pq.qsize()} pq_priority={priority_pq.qsize()})")
+                logger.info(
+                    f"[TTS-DBG #{idx}] ▶ replay start  "
+                    f"(pq_regular={regular_pq.qsize()} pq_priority={priority_pq.qsize()} pending={len(pending)})"
+                )
                 try:
-                    await _replay(messages, idx)
+                    await _replay(msgs, idx)
                     logger.info(f"[TTS-DBG #{idx}] ✓ replay done")
                 except asyncio.CancelledError:
                     raise
