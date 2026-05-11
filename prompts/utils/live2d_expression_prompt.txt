@@ -11,7 +11,6 @@
 - [look_down] — 아래 (부끄럽거나 슬플 때)
 - [look_center] — 정면
 - [look_upleft] / [look_upright] / [look_downleft] / [look_downright] — 대각선
-- [focus:x,y] — 이미지 특정 좌표 (0.0~1.0, 좌상단=0,0)
 
 예시: "[expr] 좋은 질문이야! [look_upleft] 잠깐만... [look_center] 이렇게 생각해!"
 

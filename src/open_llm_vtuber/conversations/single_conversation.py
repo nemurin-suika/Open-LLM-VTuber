@@ -140,7 +140,7 @@ async def process_single_conversation(
 
                     # [채팅제한 username] 패턴 감지 및 처리
                     if isinstance(output_item, SentenceOutput):
-                        matches = _RESTRICT_PATTERN.findall(output_item.tts_text)
+                        matches = _RESTRICT_PATTERN.findall(output_item.display_text.text)
                         if matches:
                             for username in matches:
                                 username = username.strip()

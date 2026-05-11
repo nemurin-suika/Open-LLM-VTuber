@@ -629,22 +629,39 @@ class WebSocketHandler:
 
         async def _player() -> None:
             """먼저 완성된 슬롯을 먼저 재생한다 (completion-order playback)."""
+            import time
             nonlocal _play_idx
-            # 현재 LLM+TTS가 진행 중인 슬롯 풀 (완성되지 않은 것들)
-            pending: list[tuple[list, asyncio.Event]] = []
+            SLOT_TIMEOUT = 300.0  # 슬롯당 최대 대기 시간 (초)
+            # pending: (messages, ready_event, enqueued_at)
+            pending: list[tuple[list, asyncio.Event, float]] = []
+
+            def _drain_queues() -> None:
+                """큐에서 즉시 꺼낼 수 있는 슬롯을 모두 pending에 추가."""
+                while True:
+                    try:
+                        msgs, rdy = priority_pq.get_nowait()
+                        pending.insert(0, (msgs, rdy, time.monotonic()))
+                    except asyncio.QueueEmpty:
+                        break
+                while True:
+                    try:
+                        msgs, rdy = regular_pq.get_nowait()
+                        pending.append((msgs, rdy, time.monotonic()))
+                    except asyncio.QueueEmpty:
+                        break
+
+            def _purge_timed_out() -> None:
+                """300초가 지난 슬롯을 버린다."""
+                now = time.monotonic()
+                for i in reversed(range(len(pending))):
+                    _, _, enqueued_at = pending[i]
+                    if now - enqueued_at > SLOT_TIMEOUT:
+                        pending.pop(i)
+                        logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >300s) — skipping")
 
             while True:
-                # ── 큐에서 즉시 꺼낼 수 있는 슬롯을 모두 pending에 추가 ──────────
-                while True:
-                    try:
-                        pending.insert(0, priority_pq.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-                while True:
-                    try:
-                        pending.append(regular_pq.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
+                _drain_queues()
+                _purge_timed_out()
 
                 # ── pending이 비어있으면 새 슬롯이 올 때까지 블록 ─────────────────
                 if not pending:
@@ -659,27 +676,41 @@ class WebSocketHandler:
                             await t
                         except (asyncio.CancelledError, Exception):
                             pass
+                    now = time.monotonic()
                     if get_prio in done:
-                        pending.insert(0, get_prio.result())
+                        msgs, rdy = get_prio.result()
+                        pending.insert(0, (msgs, rdy, now))
                         if get_reg in done:
-                            pending.append(get_reg.result())
+                            msgs, rdy = get_reg.result()
+                            pending.append((msgs, rdy, now))
                     else:
-                        pending.append(get_reg.result())
+                        msgs, rdy = get_reg.result()
+                        pending.append((msgs, rdy, now))
                     continue
 
                 # ── 이미 완성된 슬롯이 있는지 즉시 확인 ─────────────────────────
                 ready_idx = next(
-                    (i for i, (_, rdy) in enumerate(pending) if rdy.is_set()), None
+                    (i for i, (_, rdy, _t) in enumerate(pending) if rdy.is_set()), None
                 )
 
                 if ready_idx is None:
-                    # 아직 완성된 슬롯 없음 — 첫 완성 또는 새 슬롯 도착 대기
-                    ready_waits = [asyncio.create_task(rdy.wait()) for _, rdy in pending]
+                    # 타임아웃까지 남은 시간 계산 (가장 오래된 슬롯 기준)
+                    now = time.monotonic()
+                    wait_timeout = max(
+                        0.1,
+                        SLOT_TIMEOUT - max(now - t for _, _, t in pending)
+                    )
+
+                    ready_waits = [asyncio.create_task(rdy.wait()) for _, rdy, _ in pending]
                     get_prio    = asyncio.create_task(priority_pq.get())
                     get_reg     = asyncio.create_task(regular_pq.get())
 
                     all_tasks = ready_waits + [get_prio, get_reg]
-                    done, _ = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    done, _ = await asyncio.wait(
+                        all_tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=wait_timeout,
+                    )
 
                     for t in all_tasks:
                         if t not in done:
@@ -690,14 +721,17 @@ class WebSocketHandler:
                                 pass
 
                     # 새로 도착한 슬롯 추가
+                    now = time.monotonic()
                     if get_prio in done:
                         try:
-                            pending.insert(0, get_prio.result())
+                            msgs, rdy = get_prio.result()
+                            pending.insert(0, (msgs, rdy, now))
                         except Exception:
                             pass
                     if get_reg in done:
                         try:
-                            pending.append(get_reg.result())
+                            msgs, rdy = get_reg.result()
+                            pending.append((msgs, rdy, now))
                         except Exception:
                             pass
 
@@ -705,10 +739,10 @@ class WebSocketHandler:
                         (i for i, t in enumerate(ready_waits) if t in done), None
                     )
                     if ready_idx is None:
-                        continue  # 새 슬롯만 도착, 다시 루프
+                        continue  # 새 슬롯 도착 또는 타임아웃 체크, 다시 루프
 
                 # ── 완성된 슬롯 재생 ──────────────────────────────────────────────
-                msgs, _ = pending.pop(ready_idx)
+                msgs, _, _ = pending.pop(ready_idx)
                 _play_idx += 1
                 idx = _play_idx
                 logger.info(
