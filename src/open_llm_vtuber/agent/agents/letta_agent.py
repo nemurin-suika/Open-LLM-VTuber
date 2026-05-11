@@ -1,6 +1,8 @@
 import asyncio
 import base64 as _base64
+import glob as _glob
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -93,6 +95,111 @@ async def _preprocess_youtube_links(text: str) -> str:
         url = m.group(1).strip()
         resolved = await _resolve_youtube_url(url)
         text = text.replace(m.group(0), f"[유튜브 링크]{resolved}[/유튜브 링크]", 1)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# YouTube 영상 다운로드 및 프레임 추출
+# ---------------------------------------------------------------------------
+_YT_DLP_PATH = os.path.expanduser("~/develop/Open-LLM-VTuber-v1.2.1-en/yt-dlp_macos")
+_YT_FRAME_COUNT = 10
+_YT_DOWNLOAD_TIMEOUT = 180  # 초
+
+
+async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
+    """yt-dlp_macos로 YouTube 영상을 /tmp에 다운로드. 실제 파일 경로 반환, 실패 시 None."""
+    output_template = f"/tmp/claude_yt_{uid}.%(ext)s"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _YT_DLP_PATH, "-t", "mp4", "-o", output_template, url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_YT_DOWNLOAD_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.warning(f"[YouTube] 다운로드 타임아웃 ({_YT_DOWNLOAD_TIMEOUT}s): {url}")
+            return None
+        if proc.returncode != 0:
+            logger.warning(f"[YouTube] 다운로드 실패 (exit {proc.returncode}): {stderr.decode()[:300]}")
+            return None
+        files = _glob.glob(f"/tmp/claude_yt_{uid}.*")
+        if files:
+            logger.info(f"[YouTube] 다운로드 완료: {files[0]}")
+            return files[0]
+        return None
+    except Exception as e:
+        logger.warning(f"[YouTube] 다운로드 오류: {e}")
+        return None
+
+
+async def _extract_frames(video_path: str, frame_paths: List[str]) -> List[str]:
+    """ffmpeg으로 영상을 N등분해서 각 구간 중앙 프레임을 JPEG로 추출. 성공 경로 목록 반환."""
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+            "-of", "csv=p=0", video_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        probe_out, _ = await probe.communicate()
+        duration = float(probe_out.decode().strip())
+
+        n = len(frame_paths)
+        saved: List[str] = []
+        for i, frame_path in enumerate(frame_paths):
+            ts = duration * (i + 0.5) / n
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-ss", f"{ts:.3f}", "-i", video_path,
+                "-frames:v", "1", "-q:v", "3", frame_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if os.path.exists(frame_path):
+                saved.append(frame_path)
+
+        logger.info(f"[YouTube] {len(saved)}/{n}개 프레임 추출 완료")
+        return saved
+    except Exception as e:
+        logger.warning(f"[YouTube] 프레임 추출 오류: {e}")
+        return []
+
+
+async def _attach_youtube_frames(text: str) -> str:
+    """[유튜브 링크] 태그별로 영상을 다운로드하고 10개 프레임을 [스크린샷] 태그로 바로 뒤에 삽입."""
+    matches = list(_YOUTUBE_TAG_RE.finditer(text))
+    if not matches:
+        return text
+
+    for m in reversed(matches):
+        url = m.group(1).strip()
+        uid = _uuid.uuid4().hex
+        frame_paths = [f"/tmp/claude_yt_frame_{uid}_{i:02d}.jpg" for i in range(_YT_FRAME_COUNT)]
+        video_path = None
+        try:
+            video_path = await _download_youtube_video(url, uid)
+            if not video_path:
+                continue
+            saved_frames = await _extract_frames(video_path, frame_paths)
+            if not saved_frames:
+                continue
+            frame_tags = "\n".join(
+                f"[스크린샷 source=youtube_frame]{p}[/스크린샷]" for p in saved_frames
+            )
+            insertion = m.group(0) + "\n" + frame_tags
+            text = text[: m.start()] + insertion + text[m.end():]
+            logger.info(f"[YouTube] {len(saved_frames)}개 프레임 삽입 완료: {url}")
+        except Exception as e:
+            logger.warning(f"[YouTube] 프레임 처리 오류 ({url}): {e}")
+        finally:
+            if video_path and os.path.exists(video_path):
+                try:
+                    os.unlink(video_path)
+                except Exception:
+                    pass
+
     return text
 
 
@@ -413,6 +520,7 @@ class LettaAgent(AgentInterface):
         input_content: Union[str, List[InputUnionMember1]]
         text = self._to_text_prompt(input_data)
         text = await _preprocess_youtube_links(text)
+        text = await _attach_youtube_frames(text)
         text = await _tag_general_urls(text)
 
         if input_data.images:
