@@ -397,11 +397,11 @@ _TAGGED_URL_RE = re.compile(
     r"\[(?:유튜브|이미지|웹) 링크\](https?://[^\[\]]+?)\[/(?:유튜브|이미지|웹) 링크\]"
 )
 
-# YouTube 영상 URL 패턴 (watch?v= 또는 youtu.be/ 형식만)
+# YouTube 영상 URL 패턴 (watch?v=, youtu.be/, shorts/ 형식)
 _YT_VIDEO_RE = re.compile(
-    r"https?://(?:www\.)?(?:youtube\.com/watch(?:\?[^\s]*)?|youtu\.be/)[\w\-]+"
+    r"https?://(?:www\.)?(?:youtube\.com/(?:watch(?:\?[^\s]*)?|shorts/)|youtu\.be/)[\w\-]+"
 )
-# YouTube 도메인 전체 (채널, 게시물, 쇼츠 등 포함)
+# YouTube 도메인 전체 (채널, 게시물 등 포함)
 _YT_DOMAIN_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/")
 
 
