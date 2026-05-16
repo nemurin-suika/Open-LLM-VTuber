@@ -99,11 +99,179 @@ async def _preprocess_youtube_links(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# YouTube 영상 다운로드 및 프레임 추출
+# YouTube 영상 다운로드 및 프레임/오디오 분석
 # ---------------------------------------------------------------------------
 _YT_DLP_PATH = os.path.expanduser("~/develop/Open-LLM-VTuber-v1.2.1-en/yt-dlp_macos")
 _YT_FRAME_COUNT = 10
 _YT_DOWNLOAD_TIMEOUT = 180  # 초
+_ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:9881")
+
+
+async def _extract_audio(video_path: str, audio_path: str) -> bool:
+    """ffmpeg으로 영상에서 모노 오디오 추출 (분석에 충분한 22050Hz)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn", "-ac", "1", "-ar", "22050", audio_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        return os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000
+    except Exception:
+        return False
+
+
+async def _analyze_audio_call(
+    endpoint: str,
+    audio_path: str,
+    segments: Optional[list[dict]] = None,
+    timeout: float = 300.0,
+) -> Optional[Any]:
+    """analyze-audio 서버 호출. 실패 시 None."""
+    try:
+        import httpx
+        url = f"{_ANALYZE_AUDIO_URL.rstrip('/')}/{endpoint}"
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            with open(audio_path, "rb") as f:
+                files = {"audio": (os.path.basename(audio_path), f, "audio/wav")}
+                data = {"segments": json.dumps(segments)} if segments is not None else None
+                r = await client.post(url, files=files, data=data)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.warning(f"[Audio] {endpoint} 호출 실패 (무시): {e}")
+        return None
+
+
+async def _aa_separate(audio_path: str, out_path: str) -> bool:
+    """analyze-audio /separate → vocals 파일 저장. 성공 여부 반환."""
+    try:
+        import httpx
+        url = f"{_ANALYZE_AUDIO_URL.rstrip('/')}/separate"
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            with open(audio_path, "rb") as f:
+                r = await client.post(
+                    url,
+                    files={"audio": (os.path.basename(audio_path), f, "audio/wav")},
+                    data={"stem": "vocals"},
+                )
+        r.raise_for_status()
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+        return True
+    except Exception as e:
+        logger.warning(f"[Audio] /separate 실패 (무시): {e}")
+        return False
+
+
+async def _audio_duration(audio_path: str) -> float:
+    """ffprobe로 오디오 길이(초) 반환. 실패 시 0."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+            "-of", "csv=p=0", audio_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return float(out.decode().strip())
+    except Exception:
+        return 0.0
+
+
+_AUDIO_CHUNK_SEC = 30.0
+
+
+def _build_chunks(duration: float, chunk_sec: float = _AUDIO_CHUNK_SEC) -> list[dict]:
+    """오디오를 chunk_sec 단위 세그먼트 리스트로 분할. 자투리 5초 미만은 흡수."""
+    if duration <= chunk_sec:
+        return [{"start": 0.0, "end": round(duration, 2)}]
+    segs: list[dict] = []
+    t = 0.0
+    while t < duration:
+        end = min(duration, t + chunk_sec)
+        if end - t >= 5.0:
+            segs.append({"start": round(t, 2), "end": round(end, 2)})
+        t = end
+    return segs
+
+
+async def _audio_analysis_tags(audio_path: str) -> list[str]:
+    """오디오 → 화자별 발화 감정 + 시간별 BGM 태그 리스트.
+
+    파이프라인:
+        1. /separate → vocals (보컬 분리)
+        2. /diarize on vocals → 화자 segments
+        3. /ser on vocals (화자 segments) → 화자별 감정
+        4. /bgm_analyze on full audio (30초 청크) → 시간별 BGM
+    """
+    duration = await _audio_duration(audio_path)
+    if duration <= 0:
+        return []
+
+    uid = _uuid.uuid4().hex
+    vocals_path = f"/tmp/claude_aa_vocals_{uid}.wav"
+    target = audio_path  # 보컬 분리 실패 시 원본 사용
+    try:
+        if await _aa_separate(audio_path, vocals_path):
+            target = vocals_path
+
+        # 화자 분리 + BGM 청크는 병렬
+        diarize_task = asyncio.create_task(_analyze_audio_call("diarize", target))
+        bgm_chunks = _build_chunks(duration)
+        bgm_task = asyncio.create_task(_analyze_audio_call("bgm_analyze", audio_path, bgm_chunks))
+        diarize_res, bgm_res = await asyncio.gather(diarize_task, bgm_task)
+
+        speaker_segs = (diarize_res or {}).get("segments", []) if isinstance(diarize_res, dict) else []
+        ser_segs = speaker_segs if speaker_segs else bgm_chunks  # 화자 분리 실패 시 시간 청크
+        ser_res = await _analyze_audio_call("ser", target, ser_segs)
+
+        # 화자 라벨링 (발화 시간 많은 순으로 화자1, 화자2, ...)
+        speaker_labels: dict[str, str] = {}
+        if speaker_segs:
+            durations: dict[str, float] = {}
+            for s in speaker_segs:
+                durations[s["speaker"]] = durations.get(s["speaker"], 0.0) + (s["end"] - s["start"])
+            for idx, (spk, _) in enumerate(sorted(durations.items(), key=lambda x: -x[1]), start=1):
+                speaker_labels[spk] = f"화자{idx}"
+
+        show_time = len(bgm_chunks) > 1 or bool(speaker_segs)
+
+        def _t(start: float, end: float) -> str:
+            return f"{int(start)}~{int(end)}s " if show_time else ""
+
+        tags: list[str] = []
+        if isinstance(ser_res, list):
+            ser_by_start = {round(r.get("start", 0), 2): r for r in ser_res}
+            if speaker_segs:
+                for spk in speaker_segs:
+                    ser = ser_by_start.get(round(spk["start"], 2))
+                    if not ser:
+                        continue
+                    lbl = speaker_labels.get(spk["speaker"], "?")
+                    tags.append(
+                        f"[음성 {lbl} {_t(spk['start'], spk['end'])}{ser.get('label','?')}/{ser.get('intensity',0):.2f}]"
+                    )
+            else:
+                for seg in ser_res:
+                    tags.append(
+                        f"[음성 {_t(seg.get('start',0), seg.get('end',0))}"
+                        f"{seg.get('label','?')}/{seg.get('intensity',0):.2f}]"
+                    )
+
+        if isinstance(bgm_res, list):
+            for seg in bgm_res:
+                tags.append(
+                    f"[BGM {_t(seg.get('start',0), seg.get('end',0))}"
+                    f"{seg.get('tempo',0):.0f}BPM, {seg.get('key','?')}, {seg.get('mood','')}]"
+                )
+        return tags
+    finally:
+        if os.path.exists(vocals_path):
+            try:
+                os.unlink(vocals_path)
+            except Exception:
+                pass
 
 
 async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
@@ -177,6 +345,7 @@ async def _attach_youtube_frames(text: str) -> str:
         url = m.group(1).strip()
         uid = _uuid.uuid4().hex
         frame_paths = [f"/tmp/claude_yt_frame_{uid}_{i:02d}.jpg" for i in range(_YT_FRAME_COUNT)]
+        audio_path = f"/tmp/claude_yt_audio_{uid}.wav"
         video_path = None
         try:
             video_path = await _download_youtube_video(url, uid)
@@ -185,18 +354,30 @@ async def _attach_youtube_frames(text: str) -> str:
             saved_frames = await _extract_frames(video_path, frame_paths)
             if not saved_frames:
                 continue
-            frame_tags = "\n".join(
+            frame_tags_list = [
                 f"[스크린샷 source=youtube_frame]{p}[/스크린샷]" for p in saved_frames
-            )
-            insertion = m.group(0) + "\n" + frame_tags
+            ]
+            # 오디오 추출 + 분석 (실패해도 프레임만으로 진행)
+            audio_tags_list: list[str] = []
+            if await _extract_audio(video_path, audio_path):
+                audio_tags_list = await _audio_analysis_tags(audio_path)
+                if audio_tags_list:
+                    logger.info(f"[YouTube] 오디오 분석 태그: {audio_tags_list}")
+
+            insertion = m.group(0) + "\n" + "\n".join(frame_tags_list + audio_tags_list)
             text = text[: m.start()] + insertion + text[m.end():]
-            logger.info(f"[YouTube] {len(saved_frames)}개 프레임 삽입 완료: {url}")
+            logger.info(f"[YouTube] {len(saved_frames)}개 프레임 + 오디오 분석 삽입: {url}")
         except Exception as e:
-            logger.warning(f"[YouTube] 프레임 처리 오류 ({url}): {e}")
+            logger.warning(f"[YouTube] 미디어 처리 오류 ({url}): {e}")
         finally:
             if video_path and os.path.exists(video_path):
                 try:
                     os.unlink(video_path)
+                except Exception:
+                    pass
+            if os.path.exists(audio_path):
+                try:
+                    os.unlink(audio_path)
                 except Exception:
                     pass
 
