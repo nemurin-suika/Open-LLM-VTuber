@@ -5,13 +5,10 @@
 표정 키워드:
 - [<insert_emomap_keys>]
 
-시선 키워드 (항상 사용 가능):
-- [look_left] / [look_right] — 좌우 흘낏
-- [look_up] — 위 (생각할 때)
-- [look_down] — 아래 (부끄럽거나 슬플 때)
+시선 키워드:
+- [look_left] / [look_right] — 좌우
+- [look_up] / [look_down] — 위/아래
 - [look_center] — 정면
 - [look_upleft] / [look_upright] / [look_downleft] / [look_downright] — 대각선
-
-예시: "[expr] 좋은 질문이야! [look_upleft] 잠깐만... [look_center] 이렇게 생각해!"
 
 대괄호 [] 반드시 포함. 대괄호 안에 설명 문구 절대 금지.
