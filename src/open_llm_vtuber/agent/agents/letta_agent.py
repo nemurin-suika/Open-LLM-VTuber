@@ -700,9 +700,9 @@ class LettaAgent(AgentInterface):
         """Raw token generator. Decorated into self._chat during __init__."""
         input_content: Union[str, List[InputUnionMember1]]
         text = self._to_text_prompt(input_data)
+        text = await _tag_general_urls(text)
         text = await _preprocess_youtube_links(text)
         text = await _attach_youtube_frames(text)
-        text = await _tag_general_urls(text)
 
         if input_data.images:
             screenshot_tags: List[str] = []
