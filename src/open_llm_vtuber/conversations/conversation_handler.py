@@ -16,16 +16,17 @@ from .conversation_utils import EMOJI_LIST
 from .types import GroupConversationState
 from prompts import prompt_loader
 
-# Per-client proactive speak state: {"count": int, "max": int}
-# count = how many times the current topic has been spoken (0 = start fresh)
-# max   = how many times to continue before switching to a new topic
+# Per-client proactive speak state: {"count": int}
+# count = 누적 발화 횟수 (0 = 아직 한 번도 말한 적 없음 → 새 topic 강제)
 _proactive_state: Dict[str, Dict[str, int]] = {}
+_PROACTIVE_CONTINUE_PROB = 0.9
 
 
 def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str], List[str]]:
     """Split file into (viewer_variants, solo_variants, continue_variants).
 
     File format:
+      ===VIEWER===   (선택, 없으면 첫 섹션이 viewer로 간주)
       viewer variant 1 --- viewer variant 2
       ===SOLO===
       solo variant 1 --- solo variant 2
@@ -34,17 +35,19 @@ def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str], List[str]]:
     """
     cont_section = ""
     if "===CONTINUE===" in raw:
-        main_part, cont_section = raw.split("===CONTINUE===", 1)
-    else:
-        main_part = raw
+        raw, cont_section = raw.split("===CONTINUE===", 1)
 
-    if "===SOLO===" in main_part:
-        viewer_part, solo_part = main_part.split("===SOLO===", 1)
-    else:
-        viewer_part, solo_part = "", main_part
+    solo_section = ""
+    if "===SOLO===" in raw:
+        raw, solo_section = raw.split("===SOLO===", 1)
 
-    viewer = [v.strip() for v in viewer_part.split("---") if v.strip()]
-    solo = [v.strip() for v in solo_part.split("---") if v.strip()]
+    if "===VIEWER===" in raw:
+        _, viewer_section = raw.split("===VIEWER===", 1)
+    else:
+        viewer_section = raw
+
+    viewer = [v.strip() for v in viewer_section.split("---") if v.strip()]
+    solo = [v.strip() for v in solo_section.split("---") if v.strip()]
     cont = [v.strip() for v in cont_section.split("---") if v.strip()]
     return viewer, solo, cont
 
@@ -55,31 +58,30 @@ def _pick_proactive_variant(
     solo_variants: List[str],
     cont_variants: List[str],
 ) -> str:
-    """Pick new-topic or continue variant based on per-client state and viewer count."""
-    state = _proactive_state.setdefault(client_uid, {"count": 0, "max": 0})
+    """첫 호출은 새 topic, 이후엔 90% 확률로 CONTINUE, 10% 새 topic."""
+    state = _proactive_state.setdefault(client_uid, {"count": 0})
 
-    if state["count"] > 0 and state["count"] < state["max"] and cont_variants:
+    if state["count"] > 0 and cont_variants and random.random() < _PROACTIVE_CONTINUE_PROB:
         chosen = random.choice(cont_variants)
         state["count"] += 1
-        logger.debug(f"Proactive speak: continuing topic ({state['count']}/{state['max']})")
+        logger.debug(f"Proactive speak: continue ({state['count']})")
+        return chosen
+
+    try:
+        from ..live.live_chat_injector import get_viewer_count
+        vc = get_viewer_count()
+    except Exception:
+        vc = -1
+
+    # Only use viewer-targeting prompts when 10+ viewers are watching
+    if vc >= 10 and viewer_variants:
+        new_pool = viewer_variants + solo_variants
     else:
-        try:
-            from ..live.live_chat_injector import get_viewer_count
-            vc = get_viewer_count()
-        except Exception:
-            vc = -1
+        new_pool = solo_variants if solo_variants else viewer_variants
 
-        # Only use viewer-targeting prompts when 10+ viewers are watching
-        if vc >= 10 and viewer_variants:
-            new_pool = viewer_variants + solo_variants
-        else:
-            new_pool = solo_variants if solo_variants else viewer_variants
-
-        chosen = random.choice(new_pool) if new_pool else "뭔가 자연스럽게 혼잣말을 해줘."
-        state["max"] = random.randint(1, 3)
-        state["count"] = 1
-        logger.debug(f"Proactive speak: new topic, viewer_count={vc} (will continue up to {state['max']} times)")
-
+    chosen = random.choice(new_pool) if new_pool else "뭔가 자연스럽게 혼잣말을 해줘."
+    state["count"] += 1
+    logger.debug(f"Proactive speak: new topic, viewer_count={vc}")
     return chosen
 
 

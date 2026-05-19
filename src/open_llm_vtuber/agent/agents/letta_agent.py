@@ -582,6 +582,7 @@ _REQUIRED_TOOLS = [
     "core_memory_replace",
     "archival_memory_insert",
     "archival_memory_search",
+    "archival_memory_delete",
 ]
 _REQUIRED_BLOCKS = ["human", "persona"]
 
