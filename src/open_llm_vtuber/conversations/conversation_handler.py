@@ -22,6 +22,64 @@ _proactive_state: Dict[str, Dict[str, int]] = {}
 _PROACTIVE_CONTINUE_PROB = 0.9
 
 
+def _load_private_variants(raw: str) -> List[str]:
+    """private 프롬프트 파일: 섹션 없이 --- 구분된 자유 변형들."""
+    return [v.strip() for v in raw.split("---") if v.strip()]
+
+
+def _pick_private_variant(variants: List[str]) -> str:
+    """private 모드는 단순 랜덤 선택 (broadcast의 viewer/solo/continue 분기 불필요)."""
+    return random.choice(variants) if variants else "화면 보고 네무린한테 자연스럽게 한 마디 던져봐."
+
+
+def _build_proactive_user_input(
+    context: "ServiceContext",
+    client_uid: str,
+    mode: str = "broadcast",
+) -> str:
+    """proactive 트리거 user_input 생성. mode='broadcast' | 'private'.
+
+    broadcast: 기존 viewer/solo/continue 로직 + 시청자수 라인
+    private: 단순 자유서술 변형, 시청자수 없음
+    """
+    prompt_key = "proactive_speak_private_prompt" if mode == "private" else "proactive_speak_prompt"
+    prompt_file = (
+        context.system_config.tool_prompts.get(prompt_key) if context else None
+    )
+
+    if mode == "private":
+        if prompt_file:
+            try:
+                raw = prompt_loader.load_util(prompt_file)
+                chosen = _pick_private_variant(_load_private_variants(raw))
+            except Exception as e:
+                logger.error(f"Private proactive prompt 로드 실패: {e}")
+                chosen = "화면 보고 네무린한테 자연스럽게 한 마디 던져봐."
+        else:
+            chosen = "화면 보고 네무린한테 자연스럽게 한 마디 던져봐."
+        return f"[PROACTIVE_SPEAK_TRIGGER mode=private]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
+
+    # broadcast (기본)
+    if prompt_file:
+        try:
+            raw = prompt_loader.load_util(prompt_file)
+            viewer_v, solo_v, cont_v = _parse_proactive_prompt(raw)
+        except Exception as e:
+            logger.error(f"Broadcast proactive prompt 로드 실패: {e}")
+            viewer_v, solo_v, cont_v = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
+    else:
+        viewer_v, solo_v, cont_v = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
+    chosen = _pick_proactive_variant(client_uid, viewer_v, solo_v, cont_v)
+
+    try:
+        from ..live.live_chat_injector import get_viewer_count
+        vc = get_viewer_count()
+        vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
+    except Exception:
+        vc_line = ""
+    return f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
+
+
 def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str], List[str]]:
     """Split file into (viewer_variants, solo_variants, continue_variants).
 
@@ -115,31 +173,13 @@ async def handle_conversation_trigger(
             user_input = ""
             metadata = {"from_live": True}
         else:
-            try:
-                prompt_name = "proactive_speak_prompt"
-                prompt_file = context.system_config.tool_prompts.get(prompt_name)
-                if prompt_file:
-                    raw = prompt_loader.load_util(prompt_file)
-                    viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
-                else:
-                    logger.warning("Proactive speak prompt not configured, using default")
-                    viewer_variants, solo_variants, cont_variants = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
-                chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
-
-                try:
-                    from ..live.live_chat_injector import get_viewer_count
-                    vc = get_viewer_count()
-                    vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
-                except Exception:
-                    vc_line = ""
-
-                user_input = f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
-            except Exception as e:
-                logger.error(f"Error loading proactive speak prompt: {e}")
-                user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
-
+            mode = data.get("mode", "broadcast")
+            if mode not in ("broadcast", "private"):
+                mode = "broadcast"
+            user_input = _build_proactive_user_input(context, client_uid, mode=mode)
             metadata = {
                 "proactive_speak": True,
+                "proactive_mode": mode,
                 "skip_memory": True,
                 "skip_history": True,
             }

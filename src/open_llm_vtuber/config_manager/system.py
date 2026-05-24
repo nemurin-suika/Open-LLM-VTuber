@@ -39,6 +39,9 @@ class SystemConfig(I18nMixin):
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")
     enable_screen_capture: bool = Field(True, alias="enable_screen_capture")
+    analyze_audio_url: str = Field(
+        "http://192.168.0.15:9881", alias="analyze_audio_url"
+    )
     wind_effect: WindEffectConfig = Field(
         default_factory=WindEffectConfig, alias="wind_effect"
     )
@@ -64,6 +67,10 @@ class SystemConfig(I18nMixin):
         "enable_screen_capture": Description(
             en="Whether to pass screenshot images to the LLM. Disable for text-only LLMs (e.g. Claude CLI).",
             zh="是否将屏幕截图传递给LLM。纯文本LLM（如Claude CLI）请禁用。",
+        ),
+        "analyze_audio_url": Description(
+            en="URL of the analyze-audio server (Demucs/pyannote/SER/BGM/Whisper). Used for system audio analysis.",
+            zh="analyze-audio 服务器 URL (Demucs/pyannote/SER/BGM/Whisper)。用于系统音频分析。",
         ),
     }
 

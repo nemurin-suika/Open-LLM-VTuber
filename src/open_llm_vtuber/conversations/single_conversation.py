@@ -94,6 +94,28 @@ async def process_single_conversation(
         except Exception:
             pass
 
+        # 시스템 오디오 분석 결과 주입 (프론트가 base64 오디오를 보냈을 때)
+        _sys_audio = metadata.get("system_audio") if metadata else None
+        if _sys_audio and isinstance(_sys_audio, dict) and _sys_audio.get("data"):
+            try:
+                from ..system_audio_analyzer import analyze_system_audio, set_analyze_audio_url
+                _aa_url = getattr(context.system_config, "analyze_audio_url", None) if context else None
+                if _aa_url:
+                    set_analyze_audio_url(_aa_url)
+                logger.info(f"[SysAudio] 분석 시작 ({len(_sys_audio['data'])}B → {_aa_url or 'default'})")
+                _audio_block = await analyze_system_audio(
+                    _sys_audio["data"],
+                    _sys_audio.get("mime_type", "audio/webm"),
+                )
+                if _audio_block:
+                    logger.info(f"[SysAudio] 분석 성공, [시스템 오디오] 블록 주입 ({len(_audio_block)}자)")
+                    _audio_tag = f"[시스템 오디오]\n{_audio_block}\n[/시스템 오디오]"
+                    input_text = f"{_audio_tag}\n{input_text}" if input_text else _audio_tag
+                else:
+                    logger.warning("[SysAudio] 분석 결과 비어있음 (analyze-audio 서버 응답 실패 가능성)")
+            except Exception as e:
+                logger.warning(f"[SysAudio] 분석 통합 실패 (무시): {e}")
+
         # Create batch input
         batch_input = create_batch_input(
             input_text=input_text,

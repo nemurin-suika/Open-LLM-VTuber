@@ -1074,30 +1074,29 @@ class WebSocketHandler:
         context = self.client_contexts.get(client_uid)
 
         if msg_type == "ai-speak-signal":
+            mode = data.get("mode", "broadcast")
+            if mode not in ("broadcast", "private"):
+                mode = "broadcast"
             try:
-                from prompts import prompt_loader
-                from .conversations.conversation_handler import (
-                    _parse_proactive_prompt,
-                    _pick_proactive_variant,
-                )
-                prompt_file = context.system_config.tool_prompts.get(
-                    "proactive_speak_prompt"
-                ) if context else None
-                if prompt_file:
-                    raw = prompt_loader.load_util(prompt_file)
-                    viewer_variants, solo_variants, cont_variants = _parse_proactive_prompt(raw)
-                    chosen = _pick_proactive_variant(client_uid, viewer_variants, solo_variants, cont_variants)
-                else:
-                    chosen = "뭔가 자연스럽게 혼잣말을 해줘."
-                user_input = f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
-            except Exception:
+                from .conversations.conversation_handler import _build_proactive_user_input
+                user_input = _build_proactive_user_input(context, client_uid, mode=mode)
+            except Exception as e:
+                logger.error(f"Proactive 입력 생성 실패: {e}")
                 user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
             metadata = {
                 "proactive_speak": True,
+                "proactive_mode": mode,
                 "skip_memory": True,
                 "skip_history": True,
             }
-            images = None
+            # private 모드: 화면+오디오 입력 같이 받기 (broadcast는 기존대로 images=None)
+            if mode == "private":
+                images = data.get("images")
+                sys_audio = data.get("system_audio")
+                if sys_audio:
+                    metadata["system_audio"] = sys_audio
+            else:
+                images = None
 
         elif msg_type == "text-input":
             user_input = data.get("text", "")
@@ -1106,6 +1105,13 @@ class WebSocketHandler:
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume
+            sys_audio = data.get("system_audio")
+            if sys_audio and isinstance(sys_audio, dict) and sys_audio.get("data"):
+                _b64_len = len(sys_audio["data"])
+                logger.info(f"[SysAudio] 프론트→백엔드 수신: {_b64_len}B base64, mime={sys_audio.get('mime_type')}")
+                metadata["system_audio"] = sys_audio
+            else:
+                logger.debug(f"[SysAudio] 프론트에서 미전송 (sys_audio={type(sys_audio).__name__})")
 
         else:  # mic-audio-end
             user_input = self.received_data_buffers.get(client_uid, np.array([]))
@@ -1115,6 +1121,9 @@ class WebSocketHandler:
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume
+            sys_audio = data.get("system_audio")
+            if sys_audio:
+                metadata["system_audio"] = sys_audio
 
         # Drop screenshot images when enable_screen_capture is False
         screen_capture_enabled = (
@@ -1124,6 +1133,8 @@ class WebSocketHandler:
         )
         if not screen_capture_enabled:
             images = None
+            # 시스템 오디오도 같은 토글로 묶어 비활성화 가능 (별도 토글 추가 시 분리)
+            metadata.pop("system_audio", None)
 
         await put_immediate({
             "user_input": user_input,
