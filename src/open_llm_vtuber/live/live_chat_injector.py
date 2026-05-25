@@ -38,6 +38,10 @@ _restrict_callback: Optional[Callable[[str], Awaitable[bool]]] = None
 # Real-time viewer count: -1 = unknown, 0+ = actual count from platform API
 _viewer_count: int = -1
 
+# 프론트의 "방송 중" 토글 상태. websocket_handler가 매 메시지마다 갱신.
+# 라이브 채팅/후원 이벤트 등 string-기반으로 큐에 들어가는 경로에서 metadata에 주입하기 위함.
+_is_broadcasting: bool = False
+
 
 # ── Immediate-event queue ───────────────────────────────────────────────────
 
@@ -57,7 +61,11 @@ async def put_immediate(item) -> None:
     - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
     """
     if isinstance(item, str):
-        item = {"user_input": _tag_youtube_links(item), "images": None, "metadata": {"from_live": True}}
+        item = {
+            "user_input": _tag_youtube_links(item),
+            "images": None,
+            "metadata": {"from_live": True, "is_broadcasting": _is_broadcasting},
+        }
     elif isinstance(item, dict) and isinstance(item.get("user_input"), str):
         item = {**item, "user_input": _tag_youtube_links(item["user_input"])}
     await get_immediate_queue().put(item)
@@ -79,8 +87,22 @@ async def put_priority(item) -> None:
     - dict: {"user_input": str|ndarray, "images": optional, "metadata": dict}
     """
     if isinstance(item, str):
-        item = {"user_input": _tag_youtube_links(item), "images": None, "metadata": {"from_live": True}}
+        item = {
+            "user_input": _tag_youtube_links(item),
+            "images": None,
+            "metadata": {"from_live": True, "is_broadcasting": _is_broadcasting},
+        }
     await get_priority_queue().put(item)
+
+
+def set_is_broadcasting(value: bool) -> None:
+    """websocket_handler가 프론트의 토글 상태를 받을 때마다 호출."""
+    global _is_broadcasting
+    _is_broadcasting = bool(value)
+
+
+def get_is_broadcasting() -> bool:
+    return _is_broadcasting
 
 
 # ── User registry ───────────────────────────────────────────────────────────

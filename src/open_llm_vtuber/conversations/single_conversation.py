@@ -94,10 +94,13 @@ async def process_single_conversation(
         except Exception:
             pass
 
-        # 방송 중/아님 명시 — 프론트 토글에서 받음
+        # 방송 중/아님 명시 — 프론트 토글에서 받음. metadata에 키가 없으면 False(=방송 아님).
         _is_broadcasting = bool(metadata.get("is_broadcasting", False)) if metadata else False
         _bcast_line = "[방송 중]" if _is_broadcasting else "[방송 아님]"
         input_text = f"{_bcast_line}\n{input_text}" if input_text else _bcast_line
+        logger.info(
+            f"[Broadcasting] inject {_bcast_line} (metadata key present={'is_broadcasting' in (metadata or {})})"
+        )
 
         # 시스템 오디오 분석 결과 주입 (프론트가 base64 오디오를 보냈을 때)
         _sys_audio = metadata.get("system_audio") if metadata else None
