@@ -202,13 +202,17 @@ async def _aa_bgm(client: httpx.AsyncClient, wav_path: Path) -> Optional[dict]:
 # 원격 Whisper 전사 (analyze-audio /transcribe)
 # ---------------------------------------------------------------------------
 async def _aa_transcribe(client: httpx.AsyncClient, wav_path: Path) -> list[dict]:
-    """/transcribe → Whisper 세그먼트 리스트. 실패 시 빈 리스트."""
+    """/transcribe → Whisper 세그먼트 리스트. 실패 시 빈 리스트.
+
+    - language="" → Whisper 자동 감지 (게임/방송 영상은 영어/일본어가 흔함)
+    - vad_filter=false → 짧은 클립(10s) + BGM 섞인 오디오에서 VAD가 발화 구간을 통째로 잘라내는 케이스 방지
+    """
     try:
         with open(wav_path, "rb") as f:
             r = await client.post(
                 f"{_ANALYZE_AUDIO_URL}/transcribe",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
-                data={"language": "ko", "vad_filter": "true"},
+                data={"language": "", "vad_filter": "false"},
                 timeout=180.0,
             )
         r.raise_for_status()
@@ -254,6 +258,22 @@ def _build_utterances(
                 emotion=ser["label"] if ser else None,
                 intensity=ser["intensity"] if ser else None,
             ))
+
+        # Fallback: diarize/whisper 시간이 안 맞아서 매칭된 텍스트가 0개라면
+        # whisper segments를 단일 화자로 직접 사용 (대사는 살아남게)
+        if whisper_segs and not any(u.text for u in result):
+            logger.info(
+                f"[SysAudio] diarize-whisper 매칭 실패 ({len(diarize_segments)}/{len(whisper_segs)}) "
+                "→ whisper segments fallback"
+            )
+            result = [
+                _Utterance(
+                    start=ws["start"], end=ws["end"], label="음성",
+                    text=ws.get("text", "").strip(),
+                    emotion=None, intensity=None,
+                )
+                for ws in whisper_segs
+            ]
     else:
         # 화자 분리 없음 → 모든 whisper 발화를 단일 화자로
         for ws in whisper_segs:
@@ -307,25 +327,51 @@ async def analyze_system_audio(b64_data: str, mime_type: str = "audio/webm") -> 
             # 1. 보컬 분리 (실패해도 원본으로 계속)
             vocals_path = await _aa_separate(client, wav_path)
             target = vocals_path or wav_path
+            logger.info(
+                f"[SysAudio] 분리 결과: vocals={'있음' if vocals_path else '없음'}, "
+                f"target={target.name}"
+            )
 
-            # 2~4. 화자 분리 + Whisper + SER 병렬 실행 (모두 원격 GPU 서버 호출)
-            diarize_task = _aa_diarize(client, target)
-            whisper_task = _aa_transcribe(client, target)
-            diarize_data, whisper_segs = await asyncio.gather(diarize_task, whisper_task)
+            # 2. Whisper 전사: 원본으로 먼저 시도. 비어있고 vocals가 있으면 vocals로 재시도.
+            whisper_segs = await _aa_transcribe(client, wav_path)
+            logger.info(
+                f"[SysAudio] Whisper (원본) segments={len(whisper_segs)}, "
+                f"first_text={(whisper_segs[0].get('text', '')[:80] if whisper_segs else '')!r}"
+            )
+            if not whisper_segs and vocals_path:
+                whisper_segs = await _aa_transcribe(client, vocals_path)
+                logger.info(
+                    f"[SysAudio] Whisper (vocals fallback) segments={len(whisper_segs)}, "
+                    f"first_text={(whisper_segs[0].get('text', '')[:80] if whisper_segs else '')!r}"
+                )
 
+            # 3. 화자 분리 (vocals 우선 — 발화 구간 정렬에 더 정확)
+            diarize_data = await _aa_diarize(client, target)
             diarize_segments = (diarize_data or {}).get("segments", []) if diarize_data else []
+            logger.info(f"[SysAudio] Diarize segments={len(diarize_segments)}")
+
+            # 4. SER
             ser_segs = diarize_segments or whisper_segs
             ser_results = await _aa_ser(client, target, ser_segs) if ser_segs else None
+            logger.info(f"[SysAudio] SER results={len(ser_results) if ser_results else 0}")
 
             # 5. BGM (원본 오디오)
             bgm = await _aa_bgm(client, wav_path)
 
         utterances = _build_utterances(diarize_segments, whisper_segs, ser_results or [])
+        non_empty = sum(1 for u in utterances if u.text)
+        logger.info(
+            f"[SysAudio] _build_utterances: 총 {len(utterances)}개 (텍스트 있는 것 {non_empty}개)"
+        )
         text_block = _format_for_llm(utterances, bgm)
         if text_block:
             logger.info(
-                f"[SysAudio] 분석 완료: 발화 {len(utterances)}개, "
-                f"BGM={'있음' if bgm else '없음'}"
+                f"[SysAudio] 분석 완료: 발화 {non_empty}개, "
+                f"BGM={'있음' if bgm else '없음'}, 텍스트={len(text_block)}자"
+            )
+        else:
+            logger.warning(
+                f"[SysAudio] _format_for_llm 결과 비어있음 (utterances={len(utterances)}, BGM={'있음' if bgm else '없음'})"
             )
         return text_block
     except Exception as e:

@@ -716,8 +716,14 @@ class LettaAgent(AgentInterface):
                 await asyncio.to_thread(
                     lambda p=temp_path, d=img_data: open(p, "wb").write(_base64.b64decode(d))
                 )
-                screenshot_tags.append(f"[스크린샷 source={source}]{temp_path}[/스크린샷]")
-                logger.info(f"[Screenshot] temp 저장: {temp_path} (source={source})")
+                # ago_seconds가 있으면 태그 속성으로 추가. 0이면 "현재", 양수면 "N초 전".
+                ago = getattr(img, "ago_seconds", None)
+                if ago is not None:
+                    ago_attr = f" ago={ago:g}s"
+                else:
+                    ago_attr = ""
+                screenshot_tags.append(f"[스크린샷 source={source}{ago_attr}]{temp_path}[/스크린샷]")
+                logger.info(f"[Screenshot] temp 저장: {temp_path} (source={source}{ago_attr})")
             text = "\n".join(screenshot_tags) + "\n" + text
             input_content = text
         else:

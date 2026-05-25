@@ -1086,6 +1086,7 @@ class WebSocketHandler:
             metadata = {
                 "proactive_speak": True,
                 "proactive_mode": mode,
+                "is_broadcasting": bool(data.get("is_broadcasting", False)),
                 "skip_memory": True,
                 "skip_history": True,
             }
@@ -1101,7 +1102,7 @@ class WebSocketHandler:
         elif msg_type == "text-input":
             user_input = data.get("text", "")
             images = data.get("images")
-            metadata = {}
+            metadata = {"is_broadcasting": bool(data.get("is_broadcasting", False))}
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume
@@ -1117,7 +1118,7 @@ class WebSocketHandler:
             user_input = self.received_data_buffers.get(client_uid, np.array([]))
             self.received_data_buffers[client_uid] = np.array([])
             images = data.get("images")
-            metadata = {}
+            metadata = {"is_broadcasting": bool(data.get("is_broadcasting", False))}
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume

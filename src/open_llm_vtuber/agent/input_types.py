@@ -28,11 +28,14 @@ class ImageData:
         source: Source of the image
         data: Base64 encoded image data or URL
         mime_type: MIME type of the image (e.g., 'image/jpeg', 'image/png')
+        ago_seconds: 캡처 시점이 메시지 전송 시점보다 몇 초 전인지.
+                     현재 스크린샷이면 0, 과거 스크린샷이면 양수, 카메라처럼 의미 없으면 None.
     """
 
     source: ImageSource
     data: str  # Base64 encoded or URL
     mime_type: str
+    ago_seconds: Optional[float] = None
 
 
 @dataclass
