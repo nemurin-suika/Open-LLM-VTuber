@@ -470,9 +470,12 @@ class ServiceContext:
         logger.debug(f"constructing persona_prompt: '''{persona_prompt}'''")
 
         for prompt_name, prompt_file in self.system_config.tool_prompts.items():
-            if (
-                prompt_name == "group_conversation_prompt"
-                or prompt_name == "proactive_speak_prompt"
+            # proactive_speak_prompt / _private_prompt 은 발화 트리거 시점에 user_input으로
+            # 주입되는 "입력 프롬프트"라서 페르소나(시스템 프롬프트)에는 합치지 않는다.
+            if prompt_name in (
+                "group_conversation_prompt",
+                "proactive_speak_prompt",
+                "proactive_speak_private_prompt",
             ):
                 continue
 

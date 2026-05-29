@@ -1,14 +1,10 @@
 ## 표정 및 시선
 
-응답에 아래 키워드를 써서 Live2D 표정과 시선을 표현해. 목록에 있는 표정 키워드만 써. 없으면 가장 가까운 걸 쓰거나 생략해.
+응답에 아래 키워드를 써서 Live2D 표정/시선을 표현. 목록에 있는 표정만 써. 없으면 가까운 것 또는 생략.
 
 표정 키워드:
 - [<insert_emomap_keys>]
 
-시선 키워드:
-- [look_left] / [look_right] — 좌우
-- [look_up] / [look_down] — 위/아래
-- [look_center] — 정면
-- [look_upleft] / [look_upright] / [look_downleft] / [look_downright] — 대각선
+시선 키워드: [look_{direction}] — direction: up / down / left / right / center / upleft / upright / downleft / downright
 
 대괄호 [] 반드시 포함. 대괄호 안에 설명 문구 절대 금지.

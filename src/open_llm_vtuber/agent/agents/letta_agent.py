@@ -464,6 +464,30 @@ async def _tag_general_urls(text: str) -> str:
     return text
 
 
+def _sync_system_prompt_if_changed(base_url: str, agent_id: str, expected_system: str) -> None:
+    """conf.yaml에 letta_agent.id가 박혀있는 경우 대비, 서버 시작 시 한 번
+    Letta 서버에 저장된 system_prompt와 코드에서 계산한 system_prompt를 비교해서
+    다르면 자동으로 update. tool_prompts 파일 수정/추가/제거가 즉시 반영됨.
+
+    실패해도 서버 기동 자체는 막지 않음 — log만 남김.
+    """
+    try:
+        sync_client = Letta(base_url=base_url)
+        agent = sync_client.agents.retrieve(agent_id)
+        current = (agent.system or "")
+        if current.strip() == (expected_system or "").strip():
+            logger.info(f"[Letta sync] agent {agent_id}: system_prompt 변경 없음 (skip)")
+            return
+        logger.info(
+            f"[Letta sync] agent {agent_id}: system_prompt 변경 감지 — 자동 update "
+            f"(stored {len(current)}자 → new {len(expected_system)}자)"
+        )
+        sync_client.agents.update(agent_id, system=expected_system)
+        logger.info(f"[Letta sync] agent {agent_id}: system_prompt update 완료")
+    except Exception as e:
+        logger.warning(f"[Letta sync] system_prompt 자동 동기화 실패 (무시): {e}")
+
+
 def _select_or_create_agent(
     base_url: str,
     system_prompt: str,
@@ -665,6 +689,10 @@ class LettaAgent(AgentInterface):
 
         if not id:
             id = _select_or_create_agent(self.url, system_prompt, model, embedding, context_window_limit)
+        else:
+            # conf.yaml에 id가 박혀있어 _select_or_create_agent를 거치지 않는 경우에도,
+            # 서버 시작 시 한 번 system_prompt diff를 체크해서 변경되었으면 자동 동기화.
+            _sync_system_prompt_if_changed(self.url, id, system_prompt)
 
         self.client = AsyncLetta(base_url=self.url, timeout=600)
         self.id = id
