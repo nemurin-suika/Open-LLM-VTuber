@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/nemulin/develop/Open-LLM-VTuber-v1.2.1-en/scripts/claude_tool_approval_hook.py",
+            "timeout": 330
+          }
+        ]
+      }
+    ]
+  }
+}

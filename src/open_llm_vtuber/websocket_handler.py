@@ -29,6 +29,7 @@ from .conversations.conversation_handler import (
 )
 from .conversations.single_conversation import process_single_conversation
 from .message_handler import message_handler
+from .tool_approval import ToolApprovalManager
 
 
 class MessageType(Enum):
@@ -71,11 +72,9 @@ class WebSocketHandler:
         self.current_conversation_tasks: Dict[str, Optional[asyncio.Task]] = {}
         self.default_context_cache = default_context_cache
         self.received_data_buffers: Dict[str, np.ndarray] = {}
-        # 프론트가 매 메시지에 is_broadcasting을 같이 보내지만,
-        # 일부 경로(예: chat batch flush)는 새 metadata를 만들 때 그 값이 없어서
-        # 자동으로 False(=방송 아님)로 잘못 표기될 수 있다.
-        # 마지막으로 알려진 상태를 client별로 보존해서 모든 경로에서 일관되게 쓴다.
-        self.is_broadcasting_per_client: Dict[str, bool] = {}
+
+        # Claude 도구 사용 승인 중계기 (hook → /tool-approval → 프론트 → 여기서 resolve)
+        self.tool_approval = ToolApprovalManager()
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -96,7 +95,6 @@ class WebSocketHandler:
             "raw-audio-data": self._handle_raw_audio_data,
             "text-input": self._handle_conversation_trigger,
             "ai-speak-signal": self._handle_conversation_trigger,
-            "set-broadcasting": self._handle_set_broadcasting,
             "fetch-configs": self._handle_fetch_configs,
             "switch-config": self._handle_config_switch,
             "fetch-backgrounds": self._handle_fetch_backgrounds,
@@ -104,6 +102,7 @@ class WebSocketHandler:
             "request-init-config": self._handle_init_config_request,
             "heartbeat": self._handle_heartbeat,
             "vtuber-screen-position": self._handle_vtuber_screen_position,
+            "tool-approval-response": self._handle_tool_approval_response,
         }
 
     async def handle_new_connection(
@@ -637,7 +636,7 @@ class WebSocketHandler:
             """먼저 완성된 슬롯을 먼저 재생한다 (completion-order playback)."""
             import time
             nonlocal _play_idx
-            SLOT_TIMEOUT = 300.0  # 슬롯당 최대 대기 시간 (초)
+            SLOT_TIMEOUT = 900.0  # 슬롯당 최대 대기 시간 (초)
             # pending: (messages, ready_event, enqueued_at)
             pending: list[tuple[list, asyncio.Event, float]] = []
 
@@ -807,13 +806,10 @@ class WebSocketHandler:
                 chat_buffer.clear()
                 batch_text = BATCH_HEADER + "\n" + "\n".join(texts)
                 logger.info(f"[Chat Buffer Flush] {len(texts)}개 채팅 배치 전송")
-                # 라이브 채팅 배치 — 모든 연결된 client의 is_broadcasting 중 하나라도 True면 True.
-                # (보통 1 client만 있는 환경. multi-client면 어느 한 명이라도 방송 중이면 broadcast로 간주.)
-                bcast_now = any(self.is_broadcasting_per_client.values()) if self.is_broadcasting_per_client else False
                 batch_item = {
                     "user_input": batch_text,
                     "images": None,
-                    "metadata": {"from_live": True, "is_broadcasting": bcast_now},
+                    "metadata": {"from_live": True},
                 }
                 msgs, rdy = [], asyncio.Event()
                 await regular_pq.put((msgs, rdy))
@@ -1082,26 +1078,6 @@ class WebSocketHandler:
         msg_type = data.get("type", "")
         context = self.client_contexts.get(client_uid)
 
-        # is_broadcasting: 프론트가 보낸 값이 있으면 server-side state 갱신,
-        # 없으면 마지막 알려진 값을 사용. 모든 metadata 생성 분기에서 일관 적용.
-        # 추가로 live_chat_injector 모듈 글로벌도 같이 갱신 — chzzk 등 라이브 채팅이
-        # put_immediate(str)/put_priority(str)로 큐에 들어갈 때도 이 값을 metadata에 넣음.
-        if "is_broadcasting" in data:
-            new_val = bool(data["is_broadcasting"])
-            old_val = self.is_broadcasting_per_client.get(client_uid)
-            if old_val != new_val:
-                logger.info(
-                    f"[Broadcasting] client={client_uid[:8]} 상태 갱신: "
-                    f"{old_val} → {new_val} (msg_type={msg_type})"
-                )
-            self.is_broadcasting_per_client[client_uid] = new_val
-            try:
-                from .live.live_chat_injector import set_is_broadcasting as _set_bcast
-                _set_bcast(new_val)
-            except Exception:
-                pass
-        broadcasting = self.is_broadcasting_per_client.get(client_uid, False)
-
         if msg_type == "ai-speak-signal":
             mode = data.get("mode", "broadcast")
             if mode not in ("broadcast", "private"):
@@ -1115,7 +1091,6 @@ class WebSocketHandler:
             metadata = {
                 "proactive_speak": True,
                 "proactive_mode": mode,
-                "is_broadcasting": broadcasting,
                 "skip_memory": True,
                 "skip_history": True,
             }
@@ -1131,7 +1106,7 @@ class WebSocketHandler:
         elif msg_type == "text-input":
             user_input = data.get("text", "")
             images = data.get("images")
-            metadata = {"is_broadcasting": broadcasting}
+            metadata = {}
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume
@@ -1147,7 +1122,7 @@ class WebSocketHandler:
             user_input = self.received_data_buffers.get(client_uid, np.array([]))
             self.received_data_buffers[client_uid] = np.array([])
             images = data.get("images")
-            metadata = {"is_broadcasting": broadcasting}
+            metadata = {}
             current_volume = data.get("current_volume")
             if current_volume is not None:
                 metadata["current_volume"] = current_volume
@@ -1171,27 +1146,6 @@ class WebSocketHandler:
             "images": images,
             "metadata": metadata,
         })
-
-    async def _handle_set_broadcasting(
-        self, _websocket: WebSocket, client_uid: str, data: WSMessage
-    ) -> None:
-        """프론트의 '방송 중' 토글 상태 명시 전송 메시지 처리.
-
-        대화 트리거 외의 경로(라이브 채팅/후원)에서도 최신 상태를 사용해야 하므로
-        서버측 client 맵과 live_chat_injector 글로벌을 모두 즉시 갱신.
-        """
-        new_val = bool(data.get("is_broadcasting", False))
-        old_val = self.is_broadcasting_per_client.get(client_uid)
-        self.is_broadcasting_per_client[client_uid] = new_val
-        try:
-            from .live.live_chat_injector import set_is_broadcasting as _set_bcast
-            _set_bcast(new_val)
-        except Exception:
-            pass
-        if old_val != new_val:
-            logger.info(
-                f"[Broadcasting] client={client_uid[:8]} 토글 동기화: {old_val} → {new_val}"
-            )
 
     async def _handle_fetch_configs(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
@@ -1275,6 +1229,23 @@ class WebSocketHandler:
             await websocket.send_json({"type": "heartbeat-ack"})
         except Exception as e:
             logger.error(f"Error sending heartbeat acknowledgment: {e}")
+
+    async def _handle_tool_approval_response(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """프론트가 보낸 Claude 도구 승인/거부 결정을 중계기로 전달."""
+        request_id = data.get("request_id")
+        if not request_id:
+            logger.warning("tool-approval-response 에 request_id 없음")
+            return
+        result = {
+            "decision": data.get("decision", "deny"),
+            "scope": data.get("scope", "once"),
+            # '항상 승인'에서 네무린이 고른 범위 옵션 id (hook이 저장 규칙 결정에 사용)
+            "rule_option": data.get("rule_option"),
+            "reason": data.get("reason", ""),
+        }
+        self.tool_approval.resolve(request_id, result)
 
     async def _handle_vtuber_screen_position(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

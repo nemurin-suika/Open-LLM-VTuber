@@ -3,6 +3,8 @@ system_config:
   conf_version: 'v1.2.1'
   host: 'localhost' # use 0.0.0.0 if you want other devices to access this page
   port: 12393
+  # analyze-audio 서버 (Demucs/pyannote/SER/BGM/Whisper). 시스템 오디오 분석에 사용.
+  analyze_audio_url: 'http://192.168.0.15:9881'
   # New setting for alternative configurations
   config_alts_dir: 'characters'
   # Tool prompts that will be appended to the persona prompt
@@ -18,12 +20,35 @@ system_config:
     # Enable mcp_prompt to let LLMs with MCP (Model Context Protocol) to interact with tools.
     # Please note that Agent will decide whether to use this prompt or not.
     mcp_prompt: 'mcp_prompt'
-    # Prompt used when AI is asked to speak proactively
+    # Prompt used when AI is asked to speak proactively (broadcast mode = 방송용)
     proactive_speak_prompt: 'proactive_speak_prompt'
+    # Prompt used in private mode (1:1, 게임 화면/오디오 보며 자연스럽게)
+    proactive_speak_private_prompt: 'proactive_speak_private_prompt'
+    # PROACTIVE_SPEAK_TRIGGER 태그 설명은 input_format_prompt에 통합됨 — 별도 등록 불필요
+    # proactive_speak_system_hint: 'proactive_speak_system_hint'
     # Prompt to enhance the LLM's ability to output speakable text
     # speakable_prompt: 'speakable_prompt'
     # Additional guidance for LLM on how to use tools
-    # tool_guidance_prompt: 'tool_guidance_prompt' 
+    # tool_guidance_prompt: 'tool_guidance_prompt'
+    # Allows LLM to adjust TTS volume via [volume_up] / [volume_down] keywords
+    # volume_control_prompt: 'volume_control_prompt'
+
+  # Wind effect: randomly blows left/right to flutter hair and cloth via Live2D physics
+  wind_effect:
+    enabled: true
+    max_strength: 0.5       # 0.0~1.0 — 1.0 is full drag-equivalent force
+    transition_speed: 0.5   # lerp speed per second (0.1=slow fade, 2.0=instant)
+    interval_min: 3.0       # minimum seconds before wind changes direction
+    interval_max: 8.0       # maximum seconds before wind changes direction
+
+  # Idle gaze: gaze wanders naturally when AI is not responding
+  idle_gaze:
+    enabled: true
+    range_x: 0.3          # max horizontal gaze range (0.0=center only, 1.0=full drag range)
+    range_y: 0.2          # max vertical gaze range
+    transition_speed: 0.8 # lerp speed per second (slower = more dreamy)
+    interval_min: 2.0     # min seconds at each gaze position
+    interval_max: 5.0     # max seconds at each gaze position
 
 # configuration for the default character
 character_config:
@@ -499,3 +524,32 @@ live_config:
     room_ids: [1991478060]
     # SESSDATA cookie value (optional, for authenticated requests)
     sessdata: ""
+
+  chzzk_live:
+    # Chzzk channel ID (find it in the channel URL: chzzk.naver.com/live/<channel_id>)
+    channel_id: ""
+    # NID_AUT / NID_SES Naver login cookies (optional, needed for adult-only channels)
+    authorization_key: ""
+    session_key: ""
+    # Event types to handle
+    handle_chat: true
+    handle_donation: true
+    handle_mission: true
+    handle_subscription: true
+    # Buffer chat messages and send as a single batch when VTuber finishes speaking.
+    # Prevents the LLM from being called once per chat during busy streams.
+    buffer_chat: true
+    chat_timeout: 30           # Flush buffered chats every N seconds
+    max_chat_buffer_size: 50   # Force-flush if buffer exceeds this size (overflow safety)
+    chat_batch_header: "[시청자 채팅]"
+    # Message format templates (forwarded to VTuber as text input)
+    # Variables: {username}, {message}
+    chat_format: "[채팅] {username}: {message}"
+    # Variables: {username}, {amount}, {message}
+    donation_format: "[후원] {username}님이 {amount}원 후원: {message}"
+    # Variables: {username}, {amount}, {mission}, {message}
+    mission_format: "[미션] {username}님의 미션 ({amount}원): {mission}"
+    # Variables: {username}, {month}
+    subscription_format: "[구독] {username}님이 {month}개월째 구독 중! {message}"
+    # WebSocket proxy URL (must match the running VTuber server)
+    proxy_url: "ws://localhost:12393/proxy-ws"

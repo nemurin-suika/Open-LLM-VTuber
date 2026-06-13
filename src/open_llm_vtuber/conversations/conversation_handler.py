@@ -70,14 +70,7 @@ def _build_proactive_user_input(
     else:
         viewer_v, solo_v, cont_v = [], ["뭔가 자연스럽게 혼잣말을 해줘."], []
     chosen = _pick_proactive_variant(client_uid, viewer_v, solo_v, cont_v)
-
-    try:
-        from ..live.live_chat_injector import get_viewer_count
-        vc = get_viewer_count()
-        vc_line = f"[실시간 시청자: {vc}명]\n" if vc >= 0 else ""
-    except Exception:
-        vc_line = ""
-    return f"{vc_line}[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
+    return f"[PROACTIVE_SPEAK_TRIGGER]\n{chosen}\n[/PROACTIVE_SPEAK_TRIGGER]"
 
 
 def _parse_proactive_prompt(raw: str) -> Tuple[List[str], List[str], List[str]]:
@@ -125,21 +118,10 @@ def _pick_proactive_variant(
         logger.debug(f"Proactive speak: continue ({state['count']})")
         return chosen
 
-    try:
-        from ..live.live_chat_injector import get_viewer_count
-        vc = get_viewer_count()
-    except Exception:
-        vc = -1
-
-    # Only use viewer-targeting prompts when 10+ viewers are watching
-    if vc >= 10 and viewer_variants:
-        new_pool = viewer_variants + solo_variants
-    else:
-        new_pool = solo_variants if solo_variants else viewer_variants
-
+    new_pool = solo_variants if solo_variants else viewer_variants
     chosen = random.choice(new_pool) if new_pool else "뭔가 자연스럽게 혼잣말을 해줘."
     state["count"] += 1
-    logger.debug(f"Proactive speak: new topic, viewer_count={vc}")
+    logger.debug("Proactive speak: new topic")
     return chosen
 
 

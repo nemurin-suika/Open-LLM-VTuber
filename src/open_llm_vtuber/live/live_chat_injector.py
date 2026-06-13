@@ -35,13 +35,6 @@ _user_registry: Dict[str, str] = {}
 # Async callable(nickname: str) -> bool, set by ChzzkLivePlatform.run()
 _restrict_callback: Optional[Callable[[str], Awaitable[bool]]] = None
 
-# Real-time viewer count: -1 = unknown, 0+ = actual count from platform API
-_viewer_count: int = -1
-
-# 프론트의 "방송 중" 토글 상태. websocket_handler가 매 메시지마다 갱신.
-# 라이브 채팅/후원 이벤트 등 string-기반으로 큐에 들어가는 경로에서 metadata에 주입하기 위함.
-_is_broadcasting: bool = False
-
 
 # ── Immediate-event queue ───────────────────────────────────────────────────
 
@@ -64,7 +57,7 @@ async def put_immediate(item) -> None:
         item = {
             "user_input": _tag_youtube_links(item),
             "images": None,
-            "metadata": {"from_live": True, "is_broadcasting": _is_broadcasting},
+            "metadata": {"from_live": True},
         }
     elif isinstance(item, dict) and isinstance(item.get("user_input"), str):
         item = {**item, "user_input": _tag_youtube_links(item["user_input"])}
@@ -90,19 +83,9 @@ async def put_priority(item) -> None:
         item = {
             "user_input": _tag_youtube_links(item),
             "images": None,
-            "metadata": {"from_live": True, "is_broadcasting": _is_broadcasting},
+            "metadata": {"from_live": True},
         }
     await get_priority_queue().put(item)
-
-
-def set_is_broadcasting(value: bool) -> None:
-    """websocket_handler가 프론트의 토글 상태를 받을 때마다 호출."""
-    global _is_broadcasting
-    _is_broadcasting = bool(value)
-
-
-def get_is_broadcasting() -> bool:
-    return _is_broadcasting
 
 
 # ── User registry ───────────────────────────────────────────────────────────
@@ -131,19 +114,6 @@ async def execute_restrict(nickname: str) -> bool:
     if _restrict_callback:
         return await _restrict_callback(nickname)
     return False
-
-
-# ── Viewer count ─────────────────────────────────────────────────────────────
-
-def set_viewer_count(count: int) -> None:
-    """Update the real-time viewer count."""
-    global _viewer_count
-    _viewer_count = count
-
-
-def get_viewer_count() -> int:
-    """Return the last known viewer count. -1 means not yet fetched."""
-    return _viewer_count
 
 
 # ── Pending chat check ────────────────────────────────────────────────────────

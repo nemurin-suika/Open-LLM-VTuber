@@ -84,23 +84,7 @@ async def process_single_conversation(
             _vol_line = f"[현재 TTS 볼륨: {_current_volume}%]"
             input_text = f"{_vol_line}\n{input_text}" if input_text else _vol_line
 
-        # Inject real-time viewer count when the stream is live (count > 0)
-        try:
-            from ..live.live_chat_injector import get_viewer_count as _get_viewer_count
-            _vc = _get_viewer_count()
-            if _vc > 0:
-                _vc_line = f"[실시간 시청자: {_vc}명]"
-                input_text = f"{_vc_line}\n{input_text}" if input_text else _vc_line
-        except Exception:
-            pass
 
-        # 방송 중/아님 명시 — 프론트 토글에서 받음. metadata에 키가 없으면 False(=방송 아님).
-        _is_broadcasting = bool(metadata.get("is_broadcasting", False)) if metadata else False
-        _bcast_line = "[방송 중]" if _is_broadcasting else "[방송 아님]"
-        input_text = f"{_bcast_line}\n{input_text}" if input_text else _bcast_line
-        logger.info(
-            f"[Broadcasting] inject {_bcast_line} (metadata key present={'is_broadcasting' in (metadata or {})})"
-        )
 
         # 시스템 오디오 분석 결과 주입 (프론트가 base64 오디오를 보냈을 때)
         _sys_audio = metadata.get("system_audio") if metadata else None

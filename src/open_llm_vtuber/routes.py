@@ -3,7 +3,7 @@ import json
 from uuid import uuid4
 import numpy as np
 from datetime import datetime
-from fastapi import APIRouter, WebSocket, UploadFile, File, Response
+from fastapi import APIRouter, WebSocket, UploadFile, File, Response, Request
 from starlette.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 from loguru import logger
@@ -46,6 +46,31 @@ def init_client_ws_route(
             raise
 
     return router, ws_handler
+
+
+def init_tool_approval_route(ws_handler: WebSocketHandler) -> APIRouter:
+    """Claude 도구 사용 승인 중계 HTTP 엔드포인트.
+
+    letta가 띄운 `claude -p` 의 PreToolUse hook이 여기로 POST하면,
+    연결된 프론트로 승인 요청을 중계하고 네무린의 결정을 기다린 뒤 돌려준다.
+    """
+
+    router = APIRouter()
+
+    @router.post("/tool-approval")
+    async def tool_approval(request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({"decision": "deny", "reason": "bad_request"}, status_code=400)
+
+        result = await ws_handler.tool_approval.request_approval(
+            clients=ws_handler.client_connections,
+            payload=payload,
+        )
+        return JSONResponse(result)
+
+    return router
 
 
 def init_proxy_route(server_url: str) -> APIRouter:

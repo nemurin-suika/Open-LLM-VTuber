@@ -17,7 +17,12 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
-from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
+from .routes import (
+    init_client_ws_route,
+    init_webtool_routes,
+    init_proxy_route,
+    init_tool_approval_route,
+)
 from .service_context import ServiceContext
 from .config_manager.utils import Config
 
@@ -83,49 +88,21 @@ class WebSocketServer:
             default_context_cache=self.default_context_cache
         )
 
-        chzzk_cfg = config.live_config.chzzk_live
-
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            tasks = []
-
-            # Start the background loop that turns immediate live events into
-            # conversation turns (chats, donations, subscriptions)
-            tasks.append(asyncio.create_task(ws_handler.start_live_event_loop()))
-
-            # Start Chzzk live platform if a channel is configured
-            if chzzk_cfg.channel_id:
-                try:
-                    from .live.chzzk_live import ChzzkLivePlatform
-                    platform = ChzzkLivePlatform(
-                        channel_id=chzzk_cfg.channel_id,
-                        authorization_key=chzzk_cfg.authorization_key,
-                        session_key=chzzk_cfg.session_key,
-                        handle_chat=chzzk_cfg.handle_chat,
-                        handle_donation=chzzk_cfg.handle_donation,
-                        handle_mission=chzzk_cfg.handle_mission,
-                        handle_subscription=chzzk_cfg.handle_subscription,
-                        chat_format=chzzk_cfg.chat_format,
-                        donation_format=chzzk_cfg.donation_format,
-                        mission_format=chzzk_cfg.mission_format,
-                        subscription_format=chzzk_cfg.subscription_format,
-                    )
-                    tasks.append(asyncio.create_task(platform.run()))
-                    logger.info(
-                        f"Chzzk Live started for channel: {chzzk_cfg.channel_id}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to start Chzzk Live: {e}")
-
-            yield  # server runs here
-
-            # Shutdown: cancel all background tasks
-            for task in tasks:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            # 프론트의 text-input / mic-audio-end / ai-speak-signal 메시지는
+            # put_immediate() 큐에 enqueue 되고, start_live_event_loop가 그 consumer.
+            # chzzk 라이브 플랫폼 자동 시작은 제거됐지만 이 consumer는 살아 있어야 함.
+            tasks = [asyncio.create_task(ws_handler.start_live_event_loop())]
+            try:
+                yield
+            finally:
+                for task in tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
         self.app = FastAPI(title="Open-LLM-VTuber Server", lifespan=lifespan)
 
@@ -143,6 +120,8 @@ class WebSocketServer:
         self.app.include_router(
             init_webtool_routes(default_context_cache=self.default_context_cache),
         )
+        # Claude 도구 승인 중계 (hook → 프론트). catch-all 마운트보다 먼저 등록.
+        self.app.include_router(init_tool_approval_route(ws_handler=ws_handler))
 
         # Initialize and include proxy routes if proxy is enabled
         system_config = config.system_config
