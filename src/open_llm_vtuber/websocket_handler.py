@@ -422,6 +422,7 @@ class WebSocketHandler:
                 if not self.client_connections:
                     return
                 client_uid = next(reversed(self.client_connections))
+                ws = self.client_connections.get(client_uid)
                 context = self.client_contexts.get(client_uid)
                 if not context:
                     return
@@ -432,18 +433,64 @@ class WebSocketHandler:
                 base_meta["skip_playback_wait"] = True
 
                 captured: list[str] = []
+                _seen_notify_ts: set = set()
+
+                # [알림: ...] 중간 진행 알림을 캡처 버퍼 우회해 실시간 전송
+                import os as _os_notify
+                _NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
+
+                async def _poll_and_send_notify() -> None:
+                    while True:
+                        try:
+                            if ws and _os_notify.path.exists(_NOTIFY_FILE):
+                                with open(_NOTIFY_FILE) as _nf:
+                                    for _line in _nf:
+                                        _line = _line.strip()
+                                        if not _line:
+                                            continue
+                                        try:
+                                            _entry = json.loads(_line)
+                                            _ts = _entry.get("ts")
+                                            if _ts and _ts not in _seen_notify_ts:
+                                                _seen_notify_ts.add(_ts)
+                                                await ws.send_text(json.dumps({
+                                                    "type": "progress_update",
+                                                    "text": _entry.get("text", ""),
+                                                    "timestamp": _ts,
+                                                }))
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.3)
+
+                poll_task = asyncio.create_task(_poll_and_send_notify())
 
                 async def _cap_send(raw: str) -> None:
+                    # progress_update는 poll_task가 실시간 전송 → captured 제외
+                    try:
+                        if json.loads(raw).get("type") == "progress_update":
+                            return
+                    except Exception:
+                        pass
                     captured.append(raw)
 
-                await process_single_conversation(
-                    context=context,
-                    websocket_send=_cap_send,
-                    client_uid=client_uid,
-                    user_input=user_input,
-                    images=images,
-                    metadata=base_meta,
-                )
+                try:
+                    await process_single_conversation(
+                        context=context,
+                        websocket_send=_cap_send,
+                        client_uid=client_uid,
+                        user_input=user_input,
+                        images=images,
+                        metadata=base_meta,
+                    )
+                finally:
+                    poll_task.cancel()
+                    try:
+                        await poll_task
+                    except asyncio.CancelledError:
+                        pass
+
                 messages.extend(captured)
                 # Count captured audio chunks for diagnostics
                 real_audio = sum(
