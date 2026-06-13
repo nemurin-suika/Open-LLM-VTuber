@@ -105,13 +105,24 @@ def _read_last_intent(transcript_path: str = "") -> str:
 
     1차: letta_agent가 기록한 파일 (30초 이내)
     2차: Claude Code transcript에서 [알림:...] 파싱 (직접 실행 시 fallback)
+
+    파일에서 읽은 intent는 즉시 ts=0으로 무효화 — 다음 tool_call 팝업에서
+    같은 intent가 재사용(밀려 표시)되는 버그 방지.
     """
     # 1차: 파일 방식 (letta 경유)
     try:
         with open(_INTENT_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if time.time() - float(data.get("ts", 0)) < _INTENT_MAX_AGE:
-            return str(data.get("text", "")).strip()
+            intent = str(data.get("text", "")).strip()
+            if intent:
+                # 읽은 직후 무효화 — 다음 hook이 같은 파일을 재사용하지 않도록
+                try:
+                    with open(_INTENT_FILE, "w", encoding="utf-8") as _fw:
+                        json.dump({"text": intent, "ts": 0}, _fw, ensure_ascii=False)
+                except Exception:
+                    pass
+                return intent
     except Exception:
         pass
     # 2차: transcript fallback (직접 Claude Code 실행)
