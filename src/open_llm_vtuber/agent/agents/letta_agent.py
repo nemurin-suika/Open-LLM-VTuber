@@ -107,6 +107,8 @@ _YT_FRAME_COUNT = 10
 _YT_DOWNLOAD_TIMEOUT = 180  # 초
 _ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:9881")
 _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
+# claude_cli_client.py가 실시간으로 쓰는 중간 알림 공유 파일
+_PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
@@ -805,79 +807,140 @@ class LettaAgent(AgentInterface):
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
         _found_notifies: set = set()  # 이미 yield한 [알림:] 내용 — 중복 방지
-        async for token in stream:
-            logger.debug(f"[Letta stream] message_type={token.message_type!r}")
-            if token.message_type == "reasoning_message":
-                _rc = getattr(token, "content", "")
-                if isinstance(_rc, list):
-                    _new_r = "".join(getattr(p, "text", "") for p in _rc)
-                else:
-                    _new_r = _rc or ""
-                last_reasoning += _new_r  # 누적 (덮어쓰기 아님)
-                # [알림: 내용] 패턴 감지 → TTS 없이 채팅창에만 표시 (중복 방지)
-                for _m in re.finditer(r'\[알림:\s*(.*?)\]', last_reasoning, re.DOTALL):
-                    _notify = _m.group(1).strip()
-                    if _notify and re.sub(r'[.\s…]+', '', _notify) and _notify not in _found_notifies:
-                        yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
-                        _found_notifies.add(_notify)
-                # reasoning을 파일에 즉시 저장 — hook이 다음 tool_call 전에 읽어갈 수 있도록
-                _save_reasoning(last_reasoning)
-                continue
-            elif token.message_type == "assistant_message":
-                content = token.content
-                if isinstance(content, list):
-                    text = "".join(part.text for part in content)
-                else:
-                    text = content
-                # 누적 버퍼에 추가 — 토큰 경계를 넘어 [알림: ...] 감지
-                _assistant_buffer += text
-                _notify_texts: list[str] = []
-                for _m in re.finditer(r'\[알림:\s*(.*?)\]', _assistant_buffer, re.DOTALL):
-                    _notify = _m.group(1).strip()
-                    if _notify and re.sub(r'[.\s…]+', '', _notify) and _notify not in _found_notifies:
-                        yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
-                        _notify_texts.append(_notify)
-                        _found_notifies.add(_notify)
-                # [알림: ...] 태그를 현재 토큰의 TTS/표시 텍스트에서 제거
-                text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL).strip()
-                # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
-                # 우선순위: reasoning_message > [알림:...] 내용
-                # ※ assistant_message 본문 전체를 intent로 쓰지 않음:
-                #   본문은 응답 텍스트 전체라서 팝업에 표시하면 너무 길고 노이즈가 많음.
-                if not last_reasoning and _notify_texts:
-                    last_reasoning = " | ".join(_notify_texts)
-                    _save_reasoning(last_reasoning)
-                if not text:
-                    continue
-            elif token.message_type == "letta_error":
-                logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
-                continue
-            elif token.message_type == "tool_call_message":
-                _tc = getattr(token, "tool_call", None)
-                tool_name = getattr(_tc, "name", None) or "unknown"
-                tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
-                # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
-                _save_reasoning(last_reasoning)
-                yield {"type": "tool_call_status", "status": "running", "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time(), "intent": last_reasoning}
-                # 다음 step을 위해 초기화
-                last_reasoning = ""
-                _assistant_buffer = ""
-                _found_notifies = set()
-                continue
-            elif token.message_type == "tool_return_message":
-                tool_name = getattr(token, "name", None) or "unknown"
-                tool_id = getattr(token, "tool_call_id", None) or getattr(token, "id", None) or f"tr_{int(_time.time()*1000)}"
-                status = getattr(token, "status", "success")
-                yield {"type": "tool_call_status", "status": status, "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time()}
-                continue
-            elif token.message_type in ("stop_reason", "usage_statistics", "ping"):
-                continue
-            else:
-                logger.debug(f"[Letta] 알 수 없는 토큰 타입 무시: {token.message_type}")
-                continue
 
-            _yielded += 1
-            yield text
+        # -----------------------------------------------------------------------
+        # 중간 진행 알림 실시간 표시:
+        # claude_cli_client.py가 --output-format stream-json으로 실행하면서
+        # [알림: ...] 감지 즉시 _PROGRESS_NOTIFY_FILE에 JSONL로 기록한다.
+        # 이 polling task가 0.3초마다 파일을 읽어 _notify_queue에 넣고,
+        # Letta 스트림 루프에서 pending 알림을 먼저 yield한다.
+        # -----------------------------------------------------------------------
+        _notify_queue: asyncio.Queue = asyncio.Queue()
+        _polling_stop = asyncio.Event()
+        _notify_file_offset: int = 0
+
+        async def _poll_progress_file() -> None:
+            """백그라운드: 알림 파일을 0.3초마다 polling."""
+            nonlocal _notify_file_offset
+            while not _polling_stop.is_set():
+                try:
+                    with open(_PROGRESS_NOTIFY_FILE, "r", encoding="utf-8") as _pf:
+                        _pf.seek(_notify_file_offset)
+                        for _line in _pf:
+                            _line = _line.strip()
+                            if not _line:
+                                continue
+                            try:
+                                _item = json.loads(_line)
+                                _txt = _item.get("text", "")
+                                if _txt and _txt not in _found_notifies:
+                                    await _notify_queue.put(_txt)
+                            except Exception:
+                                pass
+                        _notify_file_offset = _pf.tell()
+                except FileNotFoundError:
+                    pass
+                except Exception as _pe:
+                    logger.debug(f"[Letta] 알림 파일 polling 오류 (무시): {_pe}")
+                await asyncio.sleep(0.3)
+
+        _poll_task = asyncio.create_task(_poll_progress_file())
+
+        async def _drain_notify_queue() -> None:
+            """pending 중간 알림을 모두 yield (호출자 generator에서 inline으로 처리)."""
+            # 참고: generator 내부에서 다른 generator를 yield from 할 수 없으므로
+            # 이 함수는 직접 호출하지 않고, 루프 안에서 while+get_nowait로 처리한다.
+            pass
+
+        try:
+            async for token in stream:
+                # Letta 스트림 메시지 처리 전 pending 알림 먼저 flush
+                while not _notify_queue.empty():
+                    _pn = _notify_queue.get_nowait()
+                    if _pn not in _found_notifies:
+                        yield {"type": "progress_update", "text": _pn, "timestamp": _time.time()}
+                        _found_notifies.add(_pn)
+
+                logger.debug(f"[Letta stream] message_type={token.message_type!r}")
+                if token.message_type == "reasoning_message":
+                    _rc = getattr(token, "content", "")
+                    if isinstance(_rc, list):
+                        _new_r = "".join(getattr(p, "text", "") for p in _rc)
+                    else:
+                        _new_r = _rc or ""
+                    last_reasoning += _new_r  # 누적 (덮어쓰기 아님)
+                    # [알림: 내용] 패턴 감지 → TTS 없이 채팅창에만 표시 (중복 방지)
+                    for _m in re.finditer(r'\[알림:\s*(.*?)\]', last_reasoning, re.DOTALL):
+                        _notify = _m.group(1).strip()
+                        if _notify and re.sub(r'[.\s…]+', '', _notify) and _notify not in _found_notifies:
+                            yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
+                            _found_notifies.add(_notify)
+                    # reasoning을 파일에 즉시 저장 — hook이 다음 tool_call 전에 읽어갈 수 있도록
+                    _save_reasoning(last_reasoning)
+                    continue
+                elif token.message_type == "assistant_message":
+                    content = token.content
+                    if isinstance(content, list):
+                        text = "".join(part.text for part in content)
+                    else:
+                        text = content
+                    # 누적 버퍼에 추가 — 토큰 경계를 넘어 [알림: ...] 감지
+                    _assistant_buffer += text
+                    _notify_texts: list[str] = []
+                    for _m in re.finditer(r'\[알림:\s*(.*?)\]', _assistant_buffer, re.DOTALL):
+                        _notify = _m.group(1).strip()
+                        if _notify and re.sub(r'[.\s…]+', '', _notify) and _notify not in _found_notifies:
+                            yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
+                            _notify_texts.append(_notify)
+                            _found_notifies.add(_notify)
+                    # [알림: ...] 태그를 현재 토큰의 TTS/표시 텍스트에서 제거
+                    text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL).strip()
+                    # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
+                    # 우선순위: reasoning_message > [알림:...] 내용
+                    # ※ assistant_message 본문 전체를 intent로 쓰지 않음:
+                    #   본문은 응답 텍스트 전체라서 팝업에 표시하면 너무 길고 노이즈가 많음.
+                    if not last_reasoning and _notify_texts:
+                        last_reasoning = " | ".join(_notify_texts)
+                        _save_reasoning(last_reasoning)
+                    if not text:
+                        continue
+                elif token.message_type == "letta_error":
+                    logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
+                    continue
+                elif token.message_type == "tool_call_message":
+                    _tc = getattr(token, "tool_call", None)
+                    tool_name = getattr(_tc, "name", None) or "unknown"
+                    tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
+                    # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
+                    _save_reasoning(last_reasoning)
+                    yield {"type": "tool_call_status", "status": "running", "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time(), "intent": last_reasoning}
+                    # 다음 step을 위해 초기화
+                    last_reasoning = ""
+                    _assistant_buffer = ""
+                    _found_notifies = set()
+                    _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
+                    continue
+                elif token.message_type == "tool_return_message":
+                    tool_name = getattr(token, "name", None) or "unknown"
+                    tool_id = getattr(token, "tool_call_id", None) or getattr(token, "id", None) or f"tr_{int(_time.time()*1000)}"
+                    status = getattr(token, "status", "success")
+                    yield {"type": "tool_call_status", "status": status, "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time()}
+                    continue
+                elif token.message_type in ("stop_reason", "usage_statistics", "ping"):
+                    continue
+                else:
+                    logger.debug(f"[Letta] 알 수 없는 토큰 타입 무시: {token.message_type}")
+                    continue
+
+                _yielded += 1
+                yield text
+        finally:
+            _polling_stop.set()
+            _poll_task.cancel()
+            try:
+                await _poll_task
+            except asyncio.CancelledError:
+                pass
 
         if _yielded == 0:
             logger.warning("[Letta] 응답 토큰 없음 — LLM이 아무것도 반환하지 않았습니다. Letta 서버 로그를 확인하세요.")
