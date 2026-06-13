@@ -34,6 +34,77 @@ ALLOWLIST_PATH = os.path.expanduser(
 TTL_DAYS = float(os.environ.get("VTUBER_APPROVAL_TTL_DAYS", "3"))
 HTTP_TIMEOUT = float(os.environ.get("VTUBER_APPROVAL_HTTP_TIMEOUT", "310"))
 
+# letta_agent.py가 tool_call 직전에 reasoning을 여기에 저장
+_INTENT_FILE = os.environ.get("MIZUKI_INTENT_FILE", "/tmp/mizuki_last_reasoning.json")
+_INTENT_MAX_AGE = 30.0  # 30초 이상 지난 reasoning은 stale로 무시
+
+
+def _extract_notify_from_text(text: str) -> str:
+    """텍스트에서 마지막 [알림: ...] 내용 추출."""
+    matches = list(re.finditer(r'\[알림:\s*(.*?)\]', text, re.DOTALL))
+    return matches[-1].group(1).strip() if matches else ""
+
+
+def _read_intent_from_transcript(transcript_path: str) -> str:
+    """Claude Code transcript JSONL에서 최근 assistant 메시지의 [알림:...] 텍스트 추출.
+    직접 Claude Code 실행 시 letta_agent가 파일을 갱신하지 않을 때의 fallback.
+
+    Claude Code transcript JSONL 실제 형식:
+      {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "..."}]}, ...}
+    """
+    if not transcript_path:
+        return ""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            lines = [l for l in f.readlines() if l.strip()]
+        # 최근 50줄에서 역순으로 가장 가까운 [알림:] 검색
+        for line in reversed(lines[-50:]):
+            try:
+                msg = json.loads(line.strip())
+            except Exception:
+                continue
+            # Claude Code transcript: type == "assistant" (role 필드가 아닌 type 필드 사용)
+            is_assistant = (
+                msg.get("type") == "assistant"
+                or msg.get("role") == "assistant"
+            )
+            if not is_assistant:
+                continue
+            # message 하위 구조에서 content 추출
+            inner = msg.get("message", msg)
+            content = inner.get("content", "")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        notify = _extract_notify_from_text(part.get("text", ""))
+                        if notify:
+                            return notify
+            elif isinstance(content, str):
+                notify = _extract_notify_from_text(content)
+                if notify:
+                    return notify
+    except Exception:
+        pass
+    return ""
+
+
+def _read_last_intent(transcript_path: str = "") -> str:
+    """미즈키의 최신 reasoning/알림 텍스트를 반환.
+
+    1차: letta_agent가 기록한 파일 (30초 이내)
+    2차: Claude Code transcript에서 [알림:...] 파싱 (직접 실행 시 fallback)
+    """
+    # 1차: 파일 방식 (letta 경유)
+    try:
+        with open(_INTENT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - float(data.get("ts", 0)) < _INTENT_MAX_AGE:
+            return str(data.get("text", "")).strip()
+    except Exception:
+        pass
+    # 2차: transcript fallback (직접 Claude Code 실행)
+    return _read_intent_from_transcript(transcript_path)
+
 # 기존 자동 도구 — letta claude_cli_client가 원래 --allowedTools로 허용하던 것들.
 # 대부분 읽기 전용이라 네무린에게 묻지 않고 무조건 승인.
 _SCREENSHOT_PREFIXES = ("/tmp/claude_screenshot", "/tmp/claude_yt_frame")
@@ -181,7 +252,7 @@ def _allowlist_add(option: dict) -> None:
     _save_allowlist({"rules": rules})
 
 
-def _ask_backend(tool_name: str, tool_input: dict, rule_options: list) -> dict:
+def _ask_backend(tool_name: str, tool_input: dict, rule_options: list, transcript_path: str = "") -> dict:
     body = json.dumps(
         {
             "tool_name": tool_name,
@@ -189,6 +260,7 @@ def _ask_backend(tool_name: str, tool_input: dict, rule_options: list) -> dict:
             # dialog에는 id/label만 노출
             "rule_options": [{"id": o["id"], "label": o["label"]} for o in rule_options],
             "ttl_days": TTL_DAYS,
+            "intent": _read_last_intent(transcript_path),  # 미즈키의 reasoning을 승인 팝업에 표시
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -210,6 +282,8 @@ def main() -> None:
 
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {}) or {}
+    # Claude Code가 직접 실행될 때 transcript_path로 [알림:...] fallback 제공
+    transcript_path = payload.get("transcript_path", "")
 
     # 1) 안전한 기존 자동 도구
     if _is_safe_auto(tool_name, tool_input):
@@ -223,7 +297,7 @@ def main() -> None:
 
     # 3) 백엔드 중계 → 네무린 결정 대기
     try:
-        result = _ask_backend(tool_name, tool_input, options)
+        result = _ask_backend(tool_name, tool_input, options, transcript_path)
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
         _emit("deny", f"승인 서버 응답 없음({type(e).__name__}) — 안전상 거부")
 

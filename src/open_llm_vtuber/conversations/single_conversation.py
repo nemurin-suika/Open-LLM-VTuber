@@ -143,6 +143,14 @@ async def process_single_conversation(
 
                     await websocket_send(json.dumps(output_item))
 
+                elif (
+                    isinstance(output_item, dict)
+                    and output_item.get("type") == "progress_update"
+                ):
+                    # [알림: ...] 중간 진행 알림 — TTS 없이 채팅창에만 표시
+                    logger.debug(f"Sending progress update: {output_item.get('text', '')[:80]}")
+                    await websocket_send(json.dumps(output_item))
+
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
 
                     # [IGNORE] 감지: TTS 없이 즉시 종료
@@ -218,6 +226,22 @@ async def process_single_conversation(
             await asyncio.gather(*tts_manager.task_list)
             await tts_manager.wait_for_delivery()
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
+
+        # Claude Code 사용량 웹소켓 전송 (캐시 파일에서 읽기, 실패 시 무시)
+        try:
+            import json as _json_usage
+            import os as _os_usage
+            _usage_path = "/tmp/claude_usage_cache.json"
+            if _os_usage.path.exists(_usage_path):
+                with open(_usage_path, encoding="utf-8") as _uf:
+                    _usage_data = _json_usage.load(_uf)
+                await websocket_send(_json_usage.dumps({
+                    "type": "claude_usage",
+                    "data": _usage_data,
+                }))
+                logger.debug(f"[Conv] claude_usage 전송: {_usage_data}")
+        except Exception as _ue:
+            logger.warning(f"[Conv] claude_usage 전송 실패 (무시): {_ue}")
 
         await finalize_conversation_turn(
             tts_manager=tts_manager,
