@@ -36,7 +36,9 @@ HTTP_TIMEOUT = float(os.environ.get("VTUBER_APPROVAL_HTTP_TIMEOUT", "310"))
 
 # letta_agent.py가 tool_call 직전에 reasoning을 여기에 저장
 _INTENT_FILE = os.environ.get("MIZUKI_INTENT_FILE", "/tmp/mizuki_last_reasoning.json")
-_INTENT_MAX_AGE = 30.0  # 30초 이상 지난 reasoning은 stale로 무시
+_INTENT_MAX_AGE = 30.0    # 30초 이상 지난 reasoning은 stale로 무시
+_INTENT_POLL_INTERVAL = 0.15  # 폴링 간격 (초)
+_INTENT_POLL_TIMEOUT = 3.0    # 최대 대기 시간 (초) — letta_agent.py 처리 지연 대비
 
 
 def _extract_intent_from_text(text: str) -> str:
@@ -103,28 +105,35 @@ def _read_intent_from_transcript(transcript_path: str) -> str:
 def _read_last_intent(transcript_path: str = "") -> str:
     """미즈키의 최신 reasoning/알림 텍스트를 반환.
 
-    1차: letta_agent가 기록한 파일 (30초 이내)
+    1차: letta_agent가 기록한 파일 (30초 이내, 최대 3초 폴링)
+         hook이 실행되는 시점에 letta_agent.py가 아직 reasoning_message를
+         처리하지 못한 경우를 대비해 파일이 업데이트될 때까지 폴링 대기.
     2차: Claude Code transcript에서 [알림:...] 파싱 (직접 실행 시 fallback)
 
     파일에서 읽은 intent는 즉시 ts=0으로 무효화 — 다음 tool_call 팝업에서
     같은 intent가 재사용(밀려 표시)되는 버그 방지.
     """
-    # 1차: 파일 방식 (letta 경유)
-    try:
-        with open(_INTENT_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if time.time() - float(data.get("ts", 0)) < _INTENT_MAX_AGE:
-            intent = str(data.get("text", "")).strip()
-            if intent:
-                # 읽은 직후 무효화 — 다음 hook이 같은 파일을 재사용하지 않도록
-                try:
-                    with open(_INTENT_FILE, "w", encoding="utf-8") as _fw:
-                        json.dump({"text": intent, "ts": 0}, _fw, ensure_ascii=False)
-                except Exception:
-                    pass
-                return intent
-    except Exception:
-        pass
+    # 1차: 파일 방식 (letta 경유) — 파일이 아직 준비되지 않았을 수 있으므로 폴링
+    deadline = time.time() + _INTENT_POLL_TIMEOUT
+    while True:
+        try:
+            with open(_INTENT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if time.time() - float(data.get("ts", 0)) < _INTENT_MAX_AGE:
+                intent = str(data.get("text", "")).strip()
+                if intent:
+                    # 읽은 직후 무효화 — 다음 hook이 같은 파일을 재사용하지 않도록
+                    try:
+                        with open(_INTENT_FILE, "w", encoding="utf-8") as _fw:
+                            json.dump({"text": intent, "ts": 0}, _fw, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    return intent
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            break
+        time.sleep(_INTENT_POLL_INTERVAL)
     # 2차: transcript fallback (직접 Claude Code 실행)
     return _read_intent_from_transcript(transcript_path)
 
