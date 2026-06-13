@@ -288,17 +288,33 @@ def _strip_live2d_tags(text: str) -> str:
 
 
 def _save_reasoning(text: str) -> None:
-    """last_reasoning을 _REASONING_FILE에 저장. hook이 다음 tool_call 전에 읽어간다.
-    저장 전 Live2D 표정/시선 태그를 제거해 팝업에 읽기 쉬운 텍스트만 표시되도록 한다.
+    """last_reasoning에서 툴 승인 팝업용 intent를 추출해 파일 저장.
+
+    추출 우선순위:
+    1. {의도} 패턴 — 마지막 중괄호 안 텍스트 (툴 승인 팝업 전용 포맷)
+    2. [알림: ...] 패턴 — 마지막 알림 (fallback, {} 없을 때만)
+    3. 둘 다 없으면 저장 안 함
     """
     if not text:
         return
     cleaned = _strip_live2d_tags(text)
     if not cleaned:
         return
+
+    # 1차: {의도} 패턴 추출 — 중괄호 안에 중괄호가 없는 단순 패턴
+    intent_matches = list(re.finditer(r'\{([^{}]+)\}', cleaned, re.DOTALL))
+    if intent_matches:
+        intent = intent_matches[-1].group(1).strip()
+    else:
+        # 2차: [알림: ...] 패턴 fallback
+        notify_matches = list(re.finditer(r'\[알림:\s*(.*?)\]', cleaned, re.DOTALL))
+        intent = notify_matches[-1].group(1).strip() if notify_matches else ""
+
+    if not intent:
+        return
     try:
         with open(_REASONING_FILE, "w", encoding="utf-8") as _rf:
-            json.dump({"text": cleaned, "ts": _time.time()}, _rf, ensure_ascii=False)
+            json.dump({"text": intent, "ts": _time.time()}, _rf, ensure_ascii=False)
     except Exception:
         pass
 

@@ -39,15 +39,27 @@ _INTENT_FILE = os.environ.get("MIZUKI_INTENT_FILE", "/tmp/mizuki_last_reasoning.
 _INTENT_MAX_AGE = 30.0  # 30초 이상 지난 reasoning은 stale로 무시
 
 
-def _extract_notify_from_text(text: str) -> str:
-    """텍스트에서 마지막 [알림: ...] 내용 추출."""
+def _extract_intent_from_text(text: str) -> str:
+    """텍스트에서 툴 승인 팝업용 intent 추출.
+
+    우선순위:
+    1. {의도} 패턴 — 마지막 중괄호 안 텍스트 (툴 승인 팝업 전용 포맷)
+    2. [알림: ...] 패턴 — 마지막 알림 (fallback, {} 없을 때만)
+    """
+    # 1차: {의도} 패턴
+    matches = list(re.finditer(r'\{([^{}]+)\}', text, re.DOTALL))
+    if matches:
+        return matches[-1].group(1).strip()
+    # 2차: [알림: ...] fallback
     matches = list(re.finditer(r'\[알림:\s*(.*?)\]', text, re.DOTALL))
     return matches[-1].group(1).strip() if matches else ""
 
 
 def _read_intent_from_transcript(transcript_path: str) -> str:
-    """Claude Code transcript JSONL에서 최근 assistant 메시지의 [알림:...] 텍스트 추출.
+    """Claude Code transcript JSONL에서 최근 assistant 메시지의 intent 텍스트 추출.
     직접 Claude Code 실행 시 letta_agent가 파일을 갱신하지 않을 때의 fallback.
+
+    추출 우선순위: {의도} → [알림: ...] (둘 다 없으면 빈 문자열)
 
     Claude Code transcript JSONL 실제 형식:
       {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "..."}]}, ...}
@@ -57,7 +69,7 @@ def _read_intent_from_transcript(transcript_path: str) -> str:
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             lines = [l for l in f.readlines() if l.strip()]
-        # 최근 50줄에서 역순으로 가장 가까운 [알림:] 검색
+        # 최근 50줄에서 역순으로 가장 가까운 intent 검색
         for line in reversed(lines[-50:]):
             try:
                 msg = json.loads(line.strip())
@@ -76,13 +88,13 @@ def _read_intent_from_transcript(transcript_path: str) -> str:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
-                        notify = _extract_notify_from_text(part.get("text", ""))
-                        if notify:
-                            return notify
+                        intent = _extract_intent_from_text(part.get("text", ""))
+                        if intent:
+                            return intent
             elif isinstance(content, str):
-                notify = _extract_notify_from_text(content)
-                if notify:
-                    return notify
+                intent = _extract_intent_from_text(content)
+                if intent:
+                    return intent
     except Exception:
         pass
     return ""
