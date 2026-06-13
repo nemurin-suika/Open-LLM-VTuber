@@ -228,18 +228,25 @@ async def process_single_conversation(
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
         # Claude Code 사용량 웹소켓 전송 (캐시 파일에서 읽기, 실패 시 무시)
+        # stale 판단: 캐시가 5분(300초) 이상 오래됐으면 전송 건너뜀
+        _USAGE_STALE_SEC = 300
         try:
             import json as _json_usage
             import os as _os_usage
+            import time as _time_usage
             _usage_path = "/tmp/claude_usage_cache.json"
             if _os_usage.path.exists(_usage_path):
-                with open(_usage_path, encoding="utf-8") as _uf:
-                    _usage_data = _json_usage.load(_uf)
-                await websocket_send(_json_usage.dumps({
-                    "type": "claude_usage",
-                    "data": _usage_data,
-                }))
-                logger.debug(f"[Conv] claude_usage 전송: {_usage_data}")
+                _mtime = _os_usage.path.getmtime(_usage_path)
+                if _time_usage.time() - _mtime <= _USAGE_STALE_SEC:
+                    with open(_usage_path, encoding="utf-8") as _uf:
+                        _usage_data = _json_usage.load(_uf)
+                    await websocket_send(_json_usage.dumps({
+                        "type": "claude_usage",
+                        "data": _usage_data,
+                    }))
+                    logger.debug(f"[Conv] claude_usage 전송: {_usage_data}")
+                else:
+                    logger.debug(f"[Conv] claude_usage 캐시가 오래됨 (stale, skip): {_time_usage.time() - _mtime:.0f}s 경과")
         except Exception as _ue:
             logger.warning(f"[Conv] claude_usage 전송 실패 (무시): {_ue}")
 

@@ -106,6 +106,7 @@ _YT_DLP_PATH = os.path.expanduser("~/develop/Open-LLM-VTuber-v1.2.1-en/yt-dlp_ma
 _YT_FRAME_COUNT = 10
 _YT_DOWNLOAD_TIMEOUT = 180  # 초
 _ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:9881")
+_REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 
 
 async def _extract_audio(video_path: str, audio_path: str) -> bool:
@@ -275,6 +276,17 @@ async def _audio_analysis_tags(audio_path: str) -> list[str]:
                 pass
 
 
+def _save_reasoning(text: str) -> None:
+    """last_reasoning을 _REASONING_FILE에 저장. hook이 다음 tool_call 전에 읽어간다."""
+    if not text:
+        return
+    try:
+        with open(_REASONING_FILE, "w", encoding="utf-8") as _rf:
+            json.dump({"text": text, "ts": _time.time()}, _rf, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
     """yt-dlp_macos로 YouTube 영상을 /tmp에 다운로드. 실제 파일 경로 반환, 실패 시 None."""
     output_template = f"/tmp/claude_yt_{uid}.%(ext)s"
@@ -304,7 +316,10 @@ async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
 
 
 async def _extract_frames(video_path: str, frame_paths: List[str]) -> List[str]:
-    """ffmpeg으로 영상을 N등분해서 각 구간 중앙 프레임을 JPEG로 추출. 성공 경로 목록 반환."""
+    """ffmpeg으로 영상을 N등분해서 각 구간 중앙 프레임을 JPEG로 추출. 성공 경로 목록 반환.
+
+    모든 프레임을 asyncio.gather로 병렬 추출해서 순차 대비 ~N배 빠름.
+    """
     try:
         probe = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -316,8 +331,8 @@ async def _extract_frames(video_path: str, frame_paths: List[str]) -> List[str]:
         duration = float(probe_out.decode().strip())
 
         n = len(frame_paths)
-        saved: List[str] = []
-        for i, frame_path in enumerate(frame_paths):
+
+        async def _extract_one(i: int, frame_path: str) -> Optional[str]:
             ts = duration * (i + 0.5) / n
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-ss", f"{ts:.3f}", "-i", video_path,
@@ -326,10 +341,15 @@ async def _extract_frames(video_path: str, frame_paths: List[str]) -> List[str]:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.communicate()
-            if os.path.exists(frame_path):
-                saved.append(frame_path)
+            return frame_path if os.path.exists(frame_path) else None
 
-        logger.info(f"[YouTube] {len(saved)}/{n}개 프레임 추출 완료")
+        results = await asyncio.gather(
+            *[_extract_one(i, p) for i, p in enumerate(frame_paths)],
+            return_exceptions=True,
+        )
+        saved = [r for r in results if isinstance(r, str)]
+
+        logger.info(f"[YouTube] {len(saved)}/{n}개 프레임 추출 완료 (병렬)")
         return saved
     except Exception as e:
         logger.warning(f"[YouTube] 프레임 추출 오류: {e}")
@@ -787,12 +807,7 @@ class LettaAgent(AgentInterface):
                         yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
                         _found_notifies.add(_notify)
                 # reasoning을 파일에 즉시 저장 — hook이 다음 tool_call 전에 읽어갈 수 있도록
-                if last_reasoning:
-                    try:
-                        with open("/tmp/mizuki_last_reasoning.json", "w", encoding="utf-8") as _rf:
-                            json.dump({"text": last_reasoning, "ts": _time.time()}, _rf, ensure_ascii=False)
-                    except Exception:
-                        pass
+                _save_reasoning(last_reasoning)
                 continue
             elif token.message_type == "assistant_message":
                 content = token.content
@@ -817,11 +832,7 @@ class LettaAgent(AgentInterface):
                     _candidate = " | ".join(_notify_texts) if _notify_texts else text
                     if _candidate:
                         last_reasoning = _candidate
-                        try:
-                            with open("/tmp/mizuki_last_reasoning.json", "w", encoding="utf-8") as _rf:
-                                json.dump({"text": last_reasoning, "ts": _time.time()}, _rf, ensure_ascii=False)
-                        except Exception:
-                            pass
+                        _save_reasoning(last_reasoning)
                 if not text:
                     continue
             elif token.message_type == "letta_error":
@@ -832,12 +843,7 @@ class LettaAgent(AgentInterface):
                 tool_name = getattr(_tc, "name", None) or "unknown"
                 tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
                 # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
-                if last_reasoning:
-                    try:
-                        with open("/tmp/mizuki_last_reasoning.json", "w", encoding="utf-8") as _rf:
-                            json.dump({"text": last_reasoning, "ts": _time.time()}, _rf, ensure_ascii=False)
-                    except Exception:
-                        pass
+                _save_reasoning(last_reasoning)
                 yield {"type": "tool_call_status", "status": "running", "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time(), "intent": last_reasoning}
                 # 다음 step을 위해 초기화
                 last_reasoning = ""
