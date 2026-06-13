@@ -107,6 +107,10 @@ _YT_FRAME_COUNT = 10
 _YT_DOWNLOAD_TIMEOUT = 180  # 초
 _ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:9881")
 _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
+# 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
+_LIVE2D_TAG_RE = re.compile(
+    r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
+)
 
 
 async def _extract_audio(video_path: str, audio_path: str) -> bool:
@@ -276,13 +280,23 @@ async def _audio_analysis_tags(audio_path: str) -> list[str]:
                 pass
 
 
+def _strip_live2d_tags(text: str) -> str:
+    """Live2D 표정/시선/볼륨 태그를 제거. tool-approval 팝업 intent 표시용으로 정리."""
+    return _LIVE2D_TAG_RE.sub("", text).strip()
+
+
 def _save_reasoning(text: str) -> None:
-    """last_reasoning을 _REASONING_FILE에 저장. hook이 다음 tool_call 전에 읽어간다."""
+    """last_reasoning을 _REASONING_FILE에 저장. hook이 다음 tool_call 전에 읽어간다.
+    저장 전 Live2D 표정/시선 태그를 제거해 팝업에 읽기 쉬운 텍스트만 표시되도록 한다.
+    """
     if not text:
+        return
+    cleaned = _strip_live2d_tags(text)
+    if not cleaned:
         return
     try:
         with open(_REASONING_FILE, "w", encoding="utf-8") as _rf:
-            json.dump({"text": text, "ts": _time.time()}, _rf, ensure_ascii=False)
+            json.dump({"text": cleaned, "ts": _time.time()}, _rf, ensure_ascii=False)
     except Exception:
         pass
 
@@ -826,13 +840,13 @@ class LettaAgent(AgentInterface):
                         _found_notifies.add(_notify)
                 # [알림: ...] 태그를 현재 토큰의 TTS/표시 텍스트에서 제거
                 text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL).strip()
-                # last_reasoning이 비어있으면 채워 tool_call intent로 활용
-                # 우선순위: reasoning_message > [알림:...] 내용 > assistant_message 본문
-                if not last_reasoning:
-                    _candidate = " | ".join(_notify_texts) if _notify_texts else text
-                    if _candidate:
-                        last_reasoning = _candidate
-                        _save_reasoning(last_reasoning)
+                # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
+                # 우선순위: reasoning_message > [알림:...] 내용
+                # ※ assistant_message 본문 전체를 intent로 쓰지 않음:
+                #   본문은 응답 텍스트 전체라서 팝업에 표시하면 너무 길고 노이즈가 많음.
+                if not last_reasoning and _notify_texts:
+                    last_reasoning = " | ".join(_notify_texts)
+                    _save_reasoning(last_reasoning)
                 if not text:
                     continue
             elif token.message_type == "letta_error":
