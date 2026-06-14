@@ -939,6 +939,10 @@ class LettaAgent(AgentInterface):
                     _assistant_buffer = ""
                     _found_notifies = set()
                     _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
+                    # tool_call 발생 시점에 이미 응답이 나갔으면 스텝 2 응답 억제
+                    # (tool_return_message 기준이면 compaction 시 타이밍이 너무 늦음)
+                    if _yielded > 0:
+                        _suppress_after_tool = True
                     continue
                 elif token.message_type == "tool_return_message":
                     tool_name = getattr(token, "name", None) or "unknown"
