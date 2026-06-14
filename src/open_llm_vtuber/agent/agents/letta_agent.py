@@ -948,14 +948,6 @@ class LettaAgent(AgentInterface):
                     logger.debug(f"[Letta] 알 수 없는 토큰 타입 무시: {token.message_type}")
                     continue
 
-                # 중복 응답 방지: core_memory_replace 실패 재시도 등으로
-                # 동일 user turn 내에서 letta가 여러 번 텍스트를 생성하는 경우
-                # 첫 번째 응답만 출력하고 이후는 로그에만 기록
-                if _yielded > 0:
-                    logger.debug(
-                        f"[Letta] 추가 assistant_message 무시 (첫 응답 이미 출력됨): {text[:60]!r}"
-                    )
-                    continue
                 _yielded += 1
                 yield text
         finally:
