@@ -820,7 +820,6 @@ class LettaAgent(AgentInterface):
         )
 
         _yielded = 0
-        _suppress_after_tool = False  # 이미 응답 후 tool_return → 스텝 2 응답 무시
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
         _found_notifies: set = set()  # 이미 yield한 [알림:] 내용 — 중복 방지
@@ -896,9 +895,6 @@ class LettaAgent(AgentInterface):
                     _save_reasoning(last_reasoning)
                     continue
                 elif token.message_type == "assistant_message":
-                    # 이미 응답이 나간 후 tool_return이 왔으면 스텝 2 응답 무시
-                    if _suppress_after_tool:
-                        continue
                     content = token.content
                     if isinstance(content, list):
                         text = "".join(part.text for part in content)
@@ -939,19 +935,12 @@ class LettaAgent(AgentInterface):
                     _assistant_buffer = ""
                     _found_notifies = set()
                     _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
-                    # tool_call 발생 시점에 이미 응답이 나갔으면 스텝 2 응답 억제
-                    # (tool_return_message 기준이면 compaction 시 타이밍이 너무 늦음)
-                    if _yielded > 0:
-                        _suppress_after_tool = True
                     continue
                 elif token.message_type == "tool_return_message":
                     tool_name = getattr(token, "name", None) or "unknown"
                     tool_id = getattr(token, "tool_call_id", None) or getattr(token, "id", None) or f"tr_{int(_time.time()*1000)}"
                     status = getattr(token, "status", "success")
                     yield {"type": "tool_call_status", "status": status, "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time()}
-                    # 이미 응답이 나간 상태에서 tool이 완료되면 스텝 2 응답 억제
-                    if _yielded > 0:
-                        _suppress_after_tool = True
                     continue
                 elif token.message_type in ("stop_reason", "usage_statistics", "ping"):
                     continue
