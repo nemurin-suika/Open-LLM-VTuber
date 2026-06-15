@@ -76,6 +76,9 @@ class WebSocketHandler:
         # Claude 도구 사용 승인 중계기 (hook → /tool-approval → 프론트 → 여기서 resolve)
         self.tool_approval = ToolApprovalManager()
 
+        # 현재 실행 중인 LLM+TTS capture task 참조 (인터럽트 시 cancel 대상)
+        self._current_capture_task: Optional[asyncio.Task] = None
+
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
 
@@ -416,6 +419,8 @@ class WebSocketHandler:
 
         async def _capture(item: dict, messages: list, ready: asyncio.Event) -> None:
             """Run LLM+TTS in capture mode; fill messages, then set ready."""
+            # 현재 task를 추적 — 인터럽트 시 cancel 대상
+            self._current_capture_task = asyncio.current_task()
             user_input_preview = str(item.get("user_input", ""))[:40]
             logger.debug(f"[TTS-DBG] capture start: {user_input_preview!r}")
             try:
@@ -508,6 +513,9 @@ class WebSocketHandler:
             except Exception as e:
                 logger.error(f"Live capture error: {e}")
             finally:
+                # task 추적 해제 (이 task가 현재 추적 중인 것과 같을 때만)
+                if self._current_capture_task is asyncio.current_task():
+                    self._current_capture_task = None
                 ready.set()
 
         async def _capture_direct_tts(text: str, messages: list, ready: asyncio.Event) -> None:
@@ -988,12 +996,34 @@ class WebSocketHandler:
     ) -> None:
         """Handle conversation interruption.
 
-        Only the explicit frontend interrupt button should reach here.
-        Automatic sources (VAD, text submission) are disabled upstream.
-        The frontend already stops its own audio when the button is pressed,
-        which sends frontend-playback-complete and naturally unblocks the player.
+        1. 현재 실행 중인 capture task (LLM+TTS) 취소
+        2. LettaAgent의 abort 플래그 설정 → 스트리밍 루프 조기 종료
+        3. 프론트엔드에 conversation-chain-end 전송 → aiState → idle
         """
-        logger.debug(f"Interrupt signal received from {client_uid} — no server action taken")
+        logger.info(f"[Interrupt] {client_uid}에서 인터럽트 신호 수신")
+
+        # 1. 현재 capture task 취소
+        task = self._current_capture_task
+        if task and not task.done():
+            logger.info("[Interrupt] 현재 capture task 취소")
+            task.cancel()
+
+        # 2. letta agent abort 플래그 설정
+        context = self.client_contexts.get(client_uid)
+        if context and hasattr(context, "agent_engine"):
+            agent = context.agent_engine
+            if hasattr(agent, "handle_interrupt"):
+                agent.handle_interrupt("")
+                logger.info("[Interrupt] agent.handle_interrupt() 호출 완료")
+
+        # 3. 프론트엔드에 conversation-chain-end 전송
+        try:
+            await websocket.send_text(
+                json.dumps({"type": "control", "text": "conversation-chain-end"})
+            )
+            logger.info("[Interrupt] conversation-chain-end 전송 완료")
+        except Exception as e:
+            logger.warning(f"[Interrupt] conversation-chain-end 전송 실패: {e}")
 
     async def _handle_history_list_request(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

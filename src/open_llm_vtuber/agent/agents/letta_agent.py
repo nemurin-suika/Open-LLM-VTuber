@@ -109,6 +109,8 @@ _ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:98
 _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 # claude_cli_client.py가 실시간으로 쓰는 중간 알림 공유 파일
 _PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
+# 인터럽트 신호: letta 서버의 claude_cli_client.py가 polling → proc.kill()
+_ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
@@ -749,6 +751,8 @@ class LettaAgent(AgentInterface):
 
         self.client = AsyncLetta(base_url=self.url, timeout=600)
         self.id = id
+        # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
+        self._abort_flag: bool = False
         logger.info(f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}")
 
         # Build the decorated pipeline: raw str tokens → SentenceOutput
@@ -769,7 +773,19 @@ class LettaAgent(AgentInterface):
         pass
 
     def handle_interrupt(self, heard_response: str) -> None:
-        pass
+        """인터럽트 신호 수신 시 _chat_raw 스트림 루프와 letta 서버의 claude -p subprocess를 종료.
+
+        1. _abort_flag = True → 스트리밍 루프 조기 break
+        2. abort 파일 생성 → letta 서버의 claude_cli_client.py watcher가 감지해서 proc.kill()
+        """
+        self._abort_flag = True
+        try:
+            with open(_ABORT_FLAG_FILE, "w", encoding="utf-8") as _af:
+                _af.write(str(_time.time()))
+            logger.info(f"[LettaAgent] abort 파일 생성: {_ABORT_FLAG_FILE}")
+        except Exception as _e:
+            logger.warning(f"[LettaAgent] abort 파일 생성 실패 (무시): {_e}")
+        logger.info("[LettaAgent] 인터럽트 신호 수신 → _abort_flag + abort 파일 설정")
 
     async def chat(  # type: ignore[override]
         self,
@@ -780,6 +796,13 @@ class LettaAgent(AgentInterface):
 
     async def _chat_raw(self, input_data: BatchInput) -> AsyncIterator[str]:
         """Raw token generator. Decorated into self._chat during __init__."""
+        # 새 대화 시작 시 abort 플래그 및 파일 초기화
+        self._abort_flag = False
+        try:
+            if os.path.exists(_ABORT_FLAG_FILE):
+                os.unlink(_ABORT_FLAG_FILE)
+        except Exception:
+            pass
         input_content: Union[str, List[InputUnionMember1]]
         text = self._to_text_prompt(input_data)
         text = await _tag_general_urls(text)
@@ -870,6 +893,11 @@ class LettaAgent(AgentInterface):
 
         try:
             async for token in stream:
+                # 인터럽트 신호 체크 — abort_flag가 설정되면 스트리밍 즉시 중단
+                if self._abort_flag:
+                    logger.info("[LettaAgent] _abort_flag 감지 → 스트리밍 루프 종료")
+                    break
+
                 # Letta 스트림 메시지 처리 전 pending 알림 먼저 flush
                 while not _notify_queue.empty():
                     _pn = _notify_queue.get_nowait()
