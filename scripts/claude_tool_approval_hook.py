@@ -31,7 +31,7 @@ APPROVAL_URL = os.environ.get("VTUBER_APPROVAL_URL", "http://127.0.0.1:12393/too
 ALLOWLIST_PATH = os.path.expanduser(
     os.environ.get("VTUBER_CLAUDE_ALLOWLIST", "~/.config/open-llm-vtuber/claude_tool_allowlist.json")
 )
-TTL_DAYS = float(os.environ.get("VTUBER_APPROVAL_TTL_DAYS", "3"))
+TTL_DAYS = float(os.environ.get("VTUBER_APPROVAL_TTL_DAYS", "1"))
 HTTP_TIMEOUT = float(os.environ.get("VTUBER_APPROVAL_HTTP_TIMEOUT", "310"))
 
 # letta_agent.py가 tool_call 직전에 reasoning을 여기에 저장

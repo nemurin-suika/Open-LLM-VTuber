@@ -69,7 +69,7 @@ class ToolApprovalManager:
                 "tool_input": payload.get("tool_input", {}),
                 # '항상 승인' 시 고를 수 있는 범위 후보 [{id, label}]
                 "rule_options": payload.get("rule_options", []),
-                "ttl_days": payload.get("ttl_days", 3),
+                "ttl_days": payload.get("ttl_days", 1),
                 # 미즈키가 이 도구를 쓰려는 이유 (reasoning)
                 "intent": payload.get("intent", ""),
             },
