@@ -111,6 +111,8 @@ _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 _PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 신호: letta 서버의 claude_cli_client.py가 polling → proc.kill()
 _ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
+# ADB 스크린샷 감시: 미즈키가 ADB로 찍은 스크린샷을 프론트에 자동 전송
+_ADB_SCREENSHOT_FILE = "/tmp/ihwan_screen.png"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
@@ -917,8 +919,14 @@ class LettaAgent(AgentInterface):
         # Letta 스트림 루프에서 pending 알림을 먼저 yield한다.
         # -----------------------------------------------------------------------
         _notify_queue: asyncio.Queue = asyncio.Queue()
+        _image_queue: asyncio.Queue = asyncio.Queue()  # ADB 스크린샷 전송용
         _polling_stop = asyncio.Event()
         _notify_file_offset: int = 0
+        # 스트림 시작 시점의 mtime으로 초기화 → 이전에 찍어둔 스크린샷 오발송 방지
+        try:
+            _adb_screenshot_mtime: float = os.path.getmtime(_ADB_SCREENSHOT_FILE)
+        except FileNotFoundError:
+            _adb_screenshot_mtime = 0.0
 
         async def _poll_progress_file() -> None:
             """백그라운드: 알림 파일을 0.3초마다 polling."""
@@ -945,7 +953,28 @@ class LettaAgent(AgentInterface):
                     logger.debug(f"[Letta] 알림 파일 polling 오류 (무시): {_pe}")
                 await asyncio.sleep(0.3)
 
+        async def _poll_adb_screenshot() -> None:
+            """백그라운드: ADB 스크린샷 파일 mtime 감시 → 변경 시 image_queue에 추가."""
+            nonlocal _adb_screenshot_mtime
+            while not _polling_stop.is_set():
+                try:
+                    mtime = os.path.getmtime(_ADB_SCREENSHOT_FILE)
+                    if mtime > _adb_screenshot_mtime:
+                        _adb_screenshot_mtime = mtime
+                        img_bytes = await asyncio.to_thread(
+                            lambda: open(_ADB_SCREENSHOT_FILE, "rb").read()
+                        )
+                        img_b64 = _base64.b64encode(img_bytes).decode()
+                        await _image_queue.put({"image_base64": img_b64, "label": "adb"})
+                        logger.debug(f"[Letta] ADB 스크린샷 변경 감지 → image_queue 추가")
+                except FileNotFoundError:
+                    pass
+                except Exception as _ae:
+                    logger.debug(f"[Letta] ADB 스크린샷 polling 오류 (무시): {_ae}")
+                await asyncio.sleep(0.5)
+
         _poll_task = asyncio.create_task(_poll_progress_file())
+        _adb_poll_task = asyncio.create_task(_poll_adb_screenshot())
 
         async def _drain_notify_queue() -> None:
             """pending 중간 알림을 모두 yield (호출자 generator에서 inline으로 처리)."""
@@ -966,6 +995,11 @@ class LettaAgent(AgentInterface):
                     if _pn not in _found_notifies:
                         yield {"type": "progress_update", "text": _pn, "timestamp": _time.time()}
                         _found_notifies.add(_pn)
+
+                # ADB 스크린샷 이미지 flush
+                while not _image_queue.empty():
+                    _pi = _image_queue.get_nowait()
+                    yield {"type": "image_display", "image_base64": _pi["image_base64"], "mime_type": "image/png", "label": _pi["label"]}
 
                 logger.debug(f"[Letta stream] message_type={token.message_type!r}")
                 if token.message_type == "reasoning_message":
@@ -1040,11 +1074,21 @@ class LettaAgent(AgentInterface):
 
                 _yielded += 1
                 yield text
+
+            # 스트림 종료 후 남은 ADB 스크린샷 마지막 flush
+            while not _image_queue.empty():
+                _pi = _image_queue.get_nowait()
+                yield {"type": "image_display", "image_base64": _pi["image_base64"], "mime_type": "image/png", "label": _pi["label"]}
         finally:
             _polling_stop.set()
             _poll_task.cancel()
+            _adb_poll_task.cancel()
             try:
                 await _poll_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await _adb_poll_task
             except asyncio.CancelledError:
                 pass
 
