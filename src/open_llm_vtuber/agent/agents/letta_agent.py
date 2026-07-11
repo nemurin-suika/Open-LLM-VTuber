@@ -981,6 +981,20 @@ class LettaAgent(AgentInterface):
         _poll_task = asyncio.create_task(_poll_progress_file())
         _adb_poll_task = asyncio.create_task(_poll_adb_screenshot())
 
+        # 스트림 → 내부 큐 피딩: 도구 실행 중에도 이미지/알림 실시간 flush 가능하게 함
+        _stream_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _feed_stream() -> None:
+            try:
+                async for _t in stream:
+                    await _stream_queue.put(_t)
+            except Exception as _fe:
+                logger.debug(f"[Letta] _feed_stream 오류: {_fe}")
+            finally:
+                await _stream_queue.put(None)  # 종료 sentinel
+
+        _stream_feed_task = asyncio.create_task(_feed_stream())
+
         async def _drain_notify_queue() -> None:
             """pending 중간 알림을 모두 yield (호출자 generator에서 inline으로 처리)."""
             # 참고: generator 내부에서 다른 generator를 yield from 할 수 없으므로
@@ -988,7 +1002,7 @@ class LettaAgent(AgentInterface):
             pass
 
         try:
-            async for token in stream:
+            while True:
                 # 인터럽트 신호 체크 — abort_flag가 설정되면 스트리밍 즉시 중단
                 if self._abort_flag:
                     logger.info("[LettaAgent] _abort_flag 감지 → 스트리밍 루프 종료")
@@ -1005,6 +1019,14 @@ class LettaAgent(AgentInterface):
                 while not _image_queue.empty():
                     _pi = _image_queue.get_nowait()
                     yield {"type": "image_display", "image_base64": _pi["image_base64"], "mime_type": "image/png", "label": _pi["label"]}
+
+                # 스트림 큐에서 다음 토큰 대기 (0.1초 timeout → 타임아웃 시 위 큐들 재flush)
+                try:
+                    token = await asyncio.wait_for(_stream_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                if token is None:  # 스트림 종료 sentinel
+                    break
 
                 logger.debug(f"[Letta stream] message_type={token.message_type!r}")
                 if token.message_type == "reasoning_message":
@@ -1088,12 +1110,17 @@ class LettaAgent(AgentInterface):
             _polling_stop.set()
             _poll_task.cancel()
             _adb_poll_task.cancel()
+            _stream_feed_task.cancel()
             try:
                 await _poll_task
             except asyncio.CancelledError:
                 pass
             try:
                 await _adb_poll_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await _stream_feed_task
             except asyncio.CancelledError:
                 pass
 
