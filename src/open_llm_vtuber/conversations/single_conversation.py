@@ -129,6 +129,10 @@ async def process_single_conversation(
             logger.info(f"With {len(images)} images")
 
         try:
+            # ADB 스크린샷 실시간 전송: LettaAgent에 websocket_send 주입 → generator yield 우회하여 즉시 전송
+            if hasattr(context.agent_engine, "_websocket_send_fn"):
+                context.agent_engine._websocket_send_fn = websocket_send
+
             # agent.chat yields Union[SentenceOutput, Dict[str, Any]]
             agent_output_stream = context.agent_engine.chat(batch_input)
 
@@ -219,6 +223,10 @@ async def process_single_conversation(
                 )
             )
             # full_response will contain partial response before error
+        finally:
+            # ADB 스크린샷 콜백 해제 (conversation 종료 후 dangling 참조 방지)
+            if hasattr(context.agent_engine, "_websocket_send_fn"):
+                context.agent_engine._websocket_send_fn = None
         # --- End processing agent response ---
 
         if not full_response and not tts_manager.task_list:

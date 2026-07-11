@@ -805,6 +805,9 @@ class LettaAgent(AgentInterface):
         self.id = id
         # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
         self._abort_flag: bool = False
+        # ADB 스크린샷 실시간 전송용 WebSocket send 함수 (single_conversation.py에서 주입)
+        # 설정 시 generator yield 방식 대신 직접 WebSocket 전송으로 즉시 이미지 전달
+        self._websocket_send_fn: Optional[Any] = None
         logger.info(f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}")
 
         # Build the decorated pipeline: raw str tokens → SentenceOutput
@@ -955,7 +958,11 @@ class LettaAgent(AgentInterface):
                 await asyncio.sleep(0.3)
 
         async def _poll_adb_screenshot() -> None:
-            """백그라운드: /tmp/*.png 전체 감시 → 변경/신규 시 image_queue에 추가."""
+            """백그라운드: /tmp/*.png 전체 감시 → 변경/신규 시 WebSocket 직접 전송 또는 image_queue에 추가.
+
+            self._websocket_send_fn이 주입되어 있으면 generator yield 우회하여 즉시 전송.
+            그렇지 않으면 기존 방식대로 _image_queue에 넣어서 flush 시 yield.
+            """
             nonlocal _adb_screenshot_mtimes
             while not _polling_stop.is_set():
                 try:
@@ -970,8 +977,21 @@ class LettaAgent(AgentInterface):
                                 )
                                 _img_b64 = _base64.b64encode(_img_bytes).decode()
                                 _label = os.path.basename(_path)
-                                await _image_queue.put({"image_base64": _img_b64, "label": _label})
-                                logger.debug(f"[Letta] ADB 스크린샷 감지 ({_label}) → image_queue 추가")
+                                _img_payload = {
+                                    "type": "image_display",
+                                    "image_base64": _img_b64,
+                                    "mime_type": "image/png",
+                                    "label": _label,
+                                }
+                                if self._websocket_send_fn is not None:
+                                    # WebSocket 직접 전송: generator yield 지연 없이 즉시 표시
+                                    asyncio.create_task(
+                                        self._websocket_send_fn(json.dumps(_img_payload))
+                                    )
+                                    logger.info(f"[Letta] ADB 스크린샷 감지 ({_label}) → WebSocket 직접 전송")
+                                else:
+                                    await _image_queue.put({"image_base64": _img_b64, "label": _label})
+                                    logger.info(f"[Letta] ADB 스크린샷 감지 ({_label}) → image_queue 추가 (fallback)")
                         except (FileNotFoundError, OSError):
                             pass
                 except Exception as _ae:
