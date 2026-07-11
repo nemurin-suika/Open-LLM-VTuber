@@ -718,6 +718,18 @@ class WebSocketHandler:
                     if now - enqueued_at > SLOT_TIMEOUT:
                         pending.pop(i)
                         logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >1200s) — skipping")
+                        # slot timeout 시 claude -p 프로세스도 종료
+                        try:
+                            if self.client_connections:
+                                _uid = next(reversed(self.client_connections))
+                                _ctx = self.client_contexts.get(_uid)
+                                if _ctx and hasattr(_ctx, "agent_engine"):
+                                    _agent = _ctx.agent_engine
+                                    if hasattr(_agent, "handle_interrupt"):
+                                        _agent.handle_interrupt("")
+                                        logger.info("[TTS-DBG] slot timeout → handle_interrupt() 호출")
+                        except Exception as _e:
+                            logger.warning(f"[TTS-DBG] slot timeout handle_interrupt 실패 (무시): {_e}")
 
             while True:
                 _drain_queues()
@@ -1022,8 +1034,13 @@ class WebSocketHandler:
                 json.dumps({"type": "control", "text": "conversation-chain-end"})
             )
             logger.info("[Interrupt] conversation-chain-end 전송 완료")
+            # 4. 인터럽트 성공 알림 전송 → 프론트에서 자막으로 표시
+            await websocket.send_text(
+                json.dumps({"type": "control", "text": "interrupt-success"})
+            )
+            logger.info("[Interrupt] interrupt-success 전송 완료")
         except Exception as e:
-            logger.warning(f"[Interrupt] conversation-chain-end 전송 실패: {e}")
+            logger.warning(f"[Interrupt] 전송 실패: {e}")
 
     async def _handle_history_list_request(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
