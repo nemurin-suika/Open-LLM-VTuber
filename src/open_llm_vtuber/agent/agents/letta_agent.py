@@ -460,6 +460,11 @@ _YT_VIDEO_RE = re.compile(
 _YT_DOMAIN_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/")
 
 
+_SOCIAL_OG_DOMAIN_RE = re.compile(
+    r"https?://(?:www\.)?(?:x\.com|twitter\.com|instagram\.com)/"
+)
+
+
 def _head_content_type(url: str, timeout: int = 10) -> str:
     """HEAD 요청으로 Content-Type 반환. 실패 시 빈 문자열."""
     try:
@@ -468,6 +473,23 @@ def _head_content_type(url: str, timeout: int = 10) -> str:
             return resp.headers.get("Content-Type", "").lower()
     except Exception:
         return ""
+
+
+def _fetch_og_image_url(url: str, timeout: int = 15) -> str:
+    """소셜 미디어 URL에서 og:image URL 추출. 실패 시 빈 문자열."""
+    try:
+        req = urllib.request.Request(url, headers=_YT_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            html = resp.read(200 * 1024).decode("utf-8", errors="ignore")
+        m = re.search(
+            r'<meta[^>]+?(?:property|name)=["\']og:image["\'][^>]+?content=["\']([^"\']+)["\']',
+            html,
+        )
+        if m:
+            return m.group(1).strip()
+    except Exception as e:
+        logger.debug(f"[og:image] fetch 실패: {url} — {e}")
+    return ""
 
 
 def _fetch_image_base64(url: str, timeout: int = 15) -> tuple:
@@ -520,6 +542,15 @@ async def _tag_general_urls(text: str) -> str:
     types = await asyncio.gather(*[_classify_url(url) for url in unique_urls])
     type_map = dict(zip(unique_urls, types))
 
+    # 소셜 미디어 URL에서 og:image 추출 (x.com, twitter.com, instagram.com)
+    social_urls = [url for url in unique_urls if _SOCIAL_OG_DOMAIN_RE.match(url)]
+    og_images: dict[str, str] = {}
+    if social_urls:
+        og_results = await asyncio.gather(*[
+            asyncio.to_thread(_fetch_og_image_url, url) for url in social_urls
+        ])
+        og_images = {url: img for url, img in zip(social_urls, og_results) if img}
+
     for url in to_process:
         url_type = type_map[url]
         if url_type == "youtube_video":
@@ -527,7 +558,13 @@ async def _tag_general_urls(text: str) -> str:
         elif url_type == "image":
             text = text.replace(url, f"[이미지 링크]{url}[/이미지 링크]", 1)
         else:
-            text = text.replace(url, f"[웹 링크]{url}[/웹 링크]", 1)
+            replacement = f"[웹 링크]{url}[/웹 링크]"
+            # 소셜 미디어 og:image가 있으면 웹 링크 뒤에 이미지 링크도 추가
+            if url in og_images:
+                og_url = og_images[url]
+                logger.info(f"[og:image] {url} → {og_url}")
+                replacement += f" [이미지 링크]{og_url}[/이미지 링크]"
+            text = text.replace(url, replacement, 1)
 
     return text
 
