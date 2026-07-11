@@ -151,6 +151,14 @@ async def process_single_conversation(
                     logger.debug(f"Sending progress update: {output_item.get('text', '')[:80]}")
                     await websocket_send(json.dumps(output_item))
 
+                elif (
+                    isinstance(output_item, dict)
+                    and output_item.get("type") == "image_display"
+                ):
+                    # 이미지 표시 — 프론트 채팅창에 이미지 렌더링
+                    logger.debug(f"Sending image_display: label={output_item.get('label', '')[:80]}")
+                    await websocket_send(json.dumps(output_item))
+
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
 
                     # [IGNORE] 감지: TTS 없이 즉시 종료

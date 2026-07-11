@@ -470,6 +470,19 @@ def _head_content_type(url: str, timeout: int = 10) -> str:
         return ""
 
 
+def _fetch_image_base64(url: str, timeout: int = 15) -> tuple:
+    """이미지 URL에서 (base64_str, mime_type) 반환. 실패 시 ('', '') 반환."""
+    try:
+        req = urllib.request.Request(url, headers=_YT_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            mime_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            return _base64.b64encode(data).decode(), mime_type
+    except Exception as e:
+        logger.warning(f"[image_display] 이미지 fetch 실패: {url} — {e}")
+        return "", ""
+
+
 async def _classify_url(url: str) -> str:
     """URL 콘텐츠 타입 분류: 'youtube_video' | 'image' | 'web'.
 
@@ -809,6 +822,15 @@ class LettaAgent(AgentInterface):
         text = await _preprocess_youtube_links(text)
         text = await _attach_youtube_frames(text)
 
+        # ── 이미지 URL 감지: [이미지 링크]URL[/이미지 링크] 패턴 추출 후 프론트 전송 ──
+        _IMAGE_LINK_RE = re.compile(r'\[이미지 링크\](https?://[^\[\]]+?)\[/이미지 링크\]')
+        for _m in _IMAGE_LINK_RE.finditer(text):
+            _img_url = _m.group(1).strip()
+            _img_b64, _mime_type = await asyncio.to_thread(_fetch_image_base64, _img_url)
+            if _img_b64:
+                logger.info(f"[image_display] URL 이미지 전송: {_img_url}")
+                yield {"type": "image_display", "image_base64": _img_b64, "mime_type": _mime_type, "label": _img_url}
+
         if input_data.images:
             screenshot_tags: List[str] = []
             for img in input_data.images:
@@ -828,6 +850,9 @@ class LettaAgent(AgentInterface):
                     ago_attr = ""
                 screenshot_tags.append(f"[스크린샷 source={source}{ago_attr}]{temp_path}[/스크린샷]")
                 logger.info(f"[Screenshot] temp 저장: {temp_path} (source={source}{ago_attr})")
+                # ── 스크린샷도 프론트에 전송 ──
+                mime = getattr(img, "media_type", None) or getattr(img, "mime_type", None) or "image/jpeg"
+                yield {"type": "image_display", "image_base64": img_data, "mime_type": mime, "label": source}
             text = "\n".join(screenshot_tags) + "\n" + text
             input_content = text
         else:
