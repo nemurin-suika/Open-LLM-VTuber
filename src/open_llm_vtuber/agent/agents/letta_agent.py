@@ -111,8 +111,8 @@ _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 _PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 신호: letta 서버의 claude_cli_client.py가 polling → proc.kill()
 _ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
-# ADB 스크린샷 감시: 미즈키가 ADB로 찍은 스크린샷을 프론트에 자동 전송
-_ADB_SCREENSHOT_FILE = "/tmp/ihwan_screen.png"
+# ADB 스크린샷 감시: /tmp/*.png 전체 감시 → 변경/신규 파일 자동 전송
+_ADB_SCREENSHOT_DIR = "/tmp"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
@@ -922,11 +922,12 @@ class LettaAgent(AgentInterface):
         _image_queue: asyncio.Queue = asyncio.Queue()  # ADB 스크린샷 전송용
         _polling_stop = asyncio.Event()
         _notify_file_offset: int = 0
-        # 스트림 시작 시점의 mtime으로 초기화 → 이전에 찍어둔 스크린샷 오발송 방지
-        try:
-            _adb_screenshot_mtime: float = os.path.getmtime(_ADB_SCREENSHOT_FILE)
-        except FileNotFoundError:
-            _adb_screenshot_mtime = 0.0
+        # 스트림 시작 시점의 /tmp/*.png mtime 전부 초기화 → 이전 스크린샷 오발송 방지
+        _adb_screenshot_mtimes: dict = {
+            _p: os.path.getmtime(_p)
+            for _p in _glob.glob(os.path.join(_ADB_SCREENSHOT_DIR, "*.png"))
+            if os.path.isfile(_p)
+        }
 
         async def _poll_progress_file() -> None:
             """백그라운드: 알림 파일을 0.3초마다 polling."""
@@ -954,21 +955,25 @@ class LettaAgent(AgentInterface):
                 await asyncio.sleep(0.3)
 
         async def _poll_adb_screenshot() -> None:
-            """백그라운드: ADB 스크린샷 파일 mtime 감시 → 변경 시 image_queue에 추가."""
-            nonlocal _adb_screenshot_mtime
+            """백그라운드: /tmp/*.png 전체 감시 → 변경/신규 시 image_queue에 추가."""
+            nonlocal _adb_screenshot_mtimes
             while not _polling_stop.is_set():
                 try:
-                    mtime = os.path.getmtime(_ADB_SCREENSHOT_FILE)
-                    if mtime > _adb_screenshot_mtime:
-                        _adb_screenshot_mtime = mtime
-                        img_bytes = await asyncio.to_thread(
-                            lambda: open(_ADB_SCREENSHOT_FILE, "rb").read()
-                        )
-                        img_b64 = _base64.b64encode(img_bytes).decode()
-                        await _image_queue.put({"image_base64": img_b64, "label": "adb"})
-                        logger.debug(f"[Letta] ADB 스크린샷 변경 감지 → image_queue 추가")
-                except FileNotFoundError:
-                    pass
+                    for _path in _glob.glob(os.path.join(_ADB_SCREENSHOT_DIR, "*.png")):
+                        try:
+                            _mtime = os.path.getmtime(_path)
+                            _prev = _adb_screenshot_mtimes.get(_path, 0.0)
+                            if _mtime > _prev:
+                                _adb_screenshot_mtimes[_path] = _mtime
+                                _img_bytes = await asyncio.to_thread(
+                                    lambda p=_path: open(p, "rb").read()
+                                )
+                                _img_b64 = _base64.b64encode(_img_bytes).decode()
+                                _label = os.path.basename(_path)
+                                await _image_queue.put({"image_base64": _img_b64, "label": _label})
+                                logger.debug(f"[Letta] ADB 스크린샷 감지 ({_label}) → image_queue 추가")
+                        except (FileNotFoundError, OSError):
+                            pass
                 except Exception as _ae:
                     logger.debug(f"[Letta] ADB 스크린샷 polling 오류 (무시): {_ae}")
                 await asyncio.sleep(0.5)
