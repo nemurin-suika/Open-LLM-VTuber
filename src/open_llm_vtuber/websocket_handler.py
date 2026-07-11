@@ -691,7 +691,7 @@ class WebSocketHandler:
             """먼저 완성된 슬롯을 먼저 재생한다 (completion-order playback)."""
             import time
             nonlocal _play_idx
-            SLOT_TIMEOUT = 1200.0  # 슬롯당 최대 대기 시간 (초) — 20분
+            SLOT_TIMEOUT = 3600.0  # 슬롯당 최대 대기 시간 (초) — 1시간
             # pending: (messages, ready_event, enqueued_at)
             pending: list[tuple[list, asyncio.Event, float]] = []
 
@@ -717,7 +717,7 @@ class WebSocketHandler:
                     _, _, enqueued_at = pending[i]
                     if now - enqueued_at > SLOT_TIMEOUT:
                         pending.pop(i)
-                        logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >1200s) — skipping")
+                        logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >3600s) — skipping")
                         # slot timeout 시 claude -p 프로세스도 종료
                         try:
                             if self.client_connections:
