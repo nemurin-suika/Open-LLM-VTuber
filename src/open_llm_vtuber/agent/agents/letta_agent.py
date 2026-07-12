@@ -984,11 +984,13 @@ class LettaAgent(AgentInterface):
                                     "label": _label,
                                 }
                                 if self._websocket_send_fn is not None:
-                                    # WebSocket 직접 전송: generator yield 지연 없이 즉시 표시
-                                    asyncio.create_task(
-                                        self._websocket_send_fn(json.dumps(_img_payload))
-                                    )
-                                    logger.info(f"[Letta] ADB 스크린샷 감지 ({_label}) → WebSocket 직접 전송")
+                                    # WebSocket 직접 전송: await로 즉시 전송 (create_task는 스트림이 끝날 때까지 밀려 한꺼번에 실행됨)
+                                    try:
+                                        await self._websocket_send_fn(json.dumps(_img_payload))
+                                        logger.info(f"[Letta] ADB 스크린샷 감지 ({_label}) → WebSocket 직접 전송")
+                                    except Exception as _send_err:
+                                        logger.debug(f"[Letta] WebSocket 직접 전송 실패 ({_label}), image_queue fallback: {_send_err}")
+                                        await _image_queue.put({"image_base64": _img_b64, "label": _label})
                                 else:
                                     await _image_queue.put({"image_base64": _img_b64, "label": _label})
                                     logger.info(f"[Letta] ADB 스크린샷 감지 ({_label}) → image_queue 추가 (fallback)")
