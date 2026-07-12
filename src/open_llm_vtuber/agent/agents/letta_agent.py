@@ -801,7 +801,7 @@ class LettaAgent(AgentInterface):
             # 서버 시작 시 한 번 system_prompt diff를 체크해서 변경되었으면 자동 동기화.
             _sync_system_prompt_if_changed(self.url, id, system_prompt)
 
-        self.client = AsyncLetta(base_url=self.url, timeout=3600)
+        self.client = AsyncLetta(base_url=self.url, timeout=7200)
         self.id = id
         # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
         self._abort_flag: bool = False
