@@ -117,6 +117,33 @@ _ADB_SCREENSHOT_DIR = "/tmp"
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
 )
+# 미즈키 응답 안에서 프론트 채팅창에 이미지를 첨부하기 위한 태그
+#   예: [이미지]/Users/nemulin/develop/create-illust/output/xxx.png[/이미지]
+# 백엔드가 감지하면 파일을 base64로 인코딩해 image_display 이벤트로 전송하고
+# TTS/채팅 텍스트에서는 태그와 경로를 통째로 제거한다.
+_MIZUKI_IMAGE_TAG_RE = re.compile(r'\[이미지\](.+?)\[/이미지\]', re.DOTALL)
+_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
+
+def _load_local_image_as_b64(path: str) -> tuple[str, str, str]:
+    """로컬 파일 경로 → (base64, mime, label). 실패 시 ("", "", "")."""
+    try:
+        _p = os.path.expanduser(path.strip())
+        with open(_p, "rb") as _f:
+            _data = _f.read()
+        _ext = os.path.splitext(_p)[1].lower()
+        _mime = _MIME_BY_EXT.get(_ext, "image/png")
+        return _base64.b64encode(_data).decode(), _mime, os.path.basename(_p)
+    except Exception as _e:
+        logger.warning(f"[image_display] 로컬 이미지 읽기 실패: {path} — {_e}")
+        return "", "", ""
 
 
 async def _extract_audio(video_path: str, audio_path: str) -> bool:
@@ -858,6 +885,10 @@ class LettaAgent(AgentInterface):
                 os.unlink(_ABORT_FLAG_FILE)
         except Exception:
             pass
+
+        # 세션 활동 상태 표시: 프론트 채팅창 마지막에 스피너를 띄우기 위한 이벤트.
+        # 여기서는 "active + detail" 로 시작 알림만 보내고, finally 블록에서 idle 이벤트를 웹소켓으로 직접 전송.
+        yield {"type": "agent_status", "status": "active", "detail": "생각 중", "timestamp": _time.time()}
         input_content: Union[str, List[InputUnionMember1]]
         text = self._to_text_prompt(input_data)
         text = await _tag_general_urls(text)
@@ -913,6 +944,7 @@ class LettaAgent(AgentInterface):
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
         _found_notifies: set = set()  # 이미 yield한 [알림:] 내용 — 중복 방지
+        _found_images: set = set()    # 이미 yield한 [이미지] 파일 경로 — 중복 방지
 
         # -----------------------------------------------------------------------
         # 중간 진행 알림 실시간 표시:
@@ -1082,8 +1114,35 @@ class LettaAgent(AgentInterface):
                             yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
                             _notify_texts.append(_notify)
                             _found_notifies.add(_notify)
-                    # [알림: ...] 태그를 현재 토큰의 TTS/표시 텍스트에서 제거
-                    text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL).strip()
+                    # [이미지]path[/이미지] 태그 감지 → 파일 base64로 인코딩해 image_display 전송
+                    for _im in _MIZUKI_IMAGE_TAG_RE.finditer(_assistant_buffer):
+                        _img_path = _im.group(1).strip()
+                        if not _img_path or _img_path in _found_images:
+                            continue
+                        _found_images.add(_img_path)  # 실패해도 재시도 방지
+                        _img_b64, _img_mime, _img_label = await asyncio.to_thread(
+                            _load_local_image_as_b64, _img_path
+                        )
+                        if _img_b64:
+                            logger.info(f"[image_display] 미즈키 첨부 이미지 전송: {_img_path}")
+                            _img_payload = {
+                                "type": "image_display",
+                                "image_base64": _img_b64,
+                                "mime_type": _img_mime,
+                                "label": _img_label,
+                            }
+                            # WebSocket 직접 전송이 가능하면 즉시 밀어 넣어서 순서 보장
+                            if self._websocket_send_fn is not None:
+                                try:
+                                    await self._websocket_send_fn(json.dumps(_img_payload))
+                                except Exception as _send_err:
+                                    logger.debug(f"[image_display] WS 직접 전송 실패, yield로 fallback: {_send_err}")
+                                    yield _img_payload
+                            else:
+                                yield _img_payload
+                    # [알림: ...] 및 [이미지]path[/이미지] 태그를 TTS/표시 텍스트에서 제거
+                    text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL)
+                    text = _MIZUKI_IMAGE_TAG_RE.sub('', text).strip()
                     # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
                     # 우선순위: reasoning_message > [알림:...] 내용
                     # ※ assistant_message 본문 전체를 intent로 쓰지 않음:
@@ -1102,11 +1161,14 @@ class LettaAgent(AgentInterface):
                     tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
                     # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
                     _save_reasoning(last_reasoning)
+                    # 세션 활동 상태를 툴 실행 중으로 업데이트 (프론트 스피너 텍스트 반영)
+                    yield {"type": "agent_status", "status": "active", "detail": f"툴 실행 중 · {tool_name}", "timestamp": _time.time()}
                     yield {"type": "tool_call_status", "status": "running", "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time(), "intent": last_reasoning}
                     # 다음 step을 위해 초기화
                     last_reasoning = ""
                     _assistant_buffer = ""
                     _found_notifies = set()
+                    _found_images = set()
                     _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
                     continue
                 elif token.message_type == "tool_return_message":
@@ -1114,6 +1176,8 @@ class LettaAgent(AgentInterface):
                     tool_id = getattr(token, "tool_call_id", None) or getattr(token, "id", None) or f"tr_{int(_time.time()*1000)}"
                     status = getattr(token, "status", "success")
                     yield {"type": "tool_call_status", "status": status, "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time()}
+                    # 툴 반환 후 다시 응답 생성 단계로 전환
+                    yield {"type": "agent_status", "status": "active", "detail": "생각 중", "timestamp": _time.time()}
                     continue
                 elif token.message_type in ("stop_reason", "usage_statistics", "ping"):
                     continue
@@ -1145,6 +1209,17 @@ class LettaAgent(AgentInterface):
                 await _stream_feed_task
             except asyncio.CancelledError:
                 pass
+            # 세션 활동 idle 전송: generator 종료 경로에서도 확실히 스피너를 꺼야 하므로
+            # 웹소켓 직접 전송을 시도한다. _websocket_send_fn이 없으면 조용히 스킵.
+            if self._websocket_send_fn is not None:
+                try:
+                    await self._websocket_send_fn(json.dumps({
+                        "type": "agent_status",
+                        "status": "idle",
+                        "timestamp": _time.time(),
+                    }))
+                except Exception as _idle_err:
+                    logger.debug(f"[Letta] agent_status idle 전송 실패 (무시): {_idle_err}")
 
         if _yielded == 0:
             logger.warning("[Letta] 응답 토큰 없음 — LLM이 아무것도 반환하지 않았습니다. Letta 서버 로그를 확인하세요.")
