@@ -118,10 +118,16 @@ _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
 )
 # 미즈키 응답 안에서 프론트 채팅창에 이미지를 첨부하기 위한 태그
-#   예: [이미지]/Users/nemulin/develop/create-illust/output/xxx.png[/이미지]
+#   기본형: [이미지]/Users/nemulin/develop/create-illust/output/xxx.png[/이미지]
+#   폴백:   <image_display path="/absolute/path.png" />  (LLM이 습관적으로 뱉는 XML 스타일)
 # 백엔드가 감지하면 파일을 base64로 인코딩해 image_display 이벤트로 전송하고
 # TTS/채팅 텍스트에서는 태그와 경로를 통째로 제거한다.
-_MIZUKI_IMAGE_TAG_RE = re.compile(r'\[이미지\](.+?)\[/이미지\]', re.DOTALL)
+# 두 형식 모두 매치하도록 alternation 사용. 경로는 group(1) 또는 group(2)에 담긴다.
+_MIZUKI_IMAGE_TAG_RE = re.compile(
+    r'\[이미지\](.+?)\[/이미지\]'
+    r'|<image_display\s+path\s*=\s*["\']?([^"\'>]+?)["\']?\s*/?>',
+    re.DOTALL,
+)
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -1114,9 +1120,9 @@ class LettaAgent(AgentInterface):
                             yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
                             _notify_texts.append(_notify)
                             _found_notifies.add(_notify)
-                    # [이미지]path[/이미지] 태그 감지 → 파일 base64로 인코딩해 image_display 전송
+                    # [이미지]path[/이미지] 또는 <image_display path="..." /> 태그 감지 → 파일 base64로 인코딩해 image_display 전송
                     for _im in _MIZUKI_IMAGE_TAG_RE.finditer(_assistant_buffer):
-                        _img_path = _im.group(1).strip()
+                        _img_path = (_im.group(1) or _im.group(2) or "").strip()
                         if not _img_path or _img_path in _found_images:
                             continue
                         _found_images.add(_img_path)  # 실패해도 재시도 방지
