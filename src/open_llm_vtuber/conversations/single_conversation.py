@@ -163,6 +163,16 @@ async def process_single_conversation(
                     logger.debug(f"Sending image_display: label={output_item.get('label', '')[:80]}")
                     await websocket_send(json.dumps(output_item))
 
+                elif (
+                    isinstance(output_item, dict)
+                    and output_item.get("type") == "agent_status"
+                ):
+                    # 세션 활동 상태 — 프론트 채팅창 마지막에 스피너를 표시하기 위한 이벤트
+                    logger.debug(
+                        f"Sending agent_status: status={output_item.get('status')} detail={output_item.get('detail', '')[:80]}"
+                    )
+                    await websocket_send(json.dumps(output_item))
+
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
 
                     # [IGNORE] 감지: TTS 없이 즉시 종료

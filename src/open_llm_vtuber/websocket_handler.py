@@ -473,8 +473,21 @@ class WebSocketHandler:
 
                 async def _cap_send(raw: str) -> None:
                     # progress_update는 poll_task가 실시간 전송 → captured 제외
+                    # image_display는 오디오 순서와 무관하므로 즉시 전송 → captured 제외
                     try:
-                        if json.loads(raw).get("type") == "progress_update":
+                        _msg_type = json.loads(raw).get("type")
+                        if _msg_type == "progress_update":
+                            return
+                        if _msg_type == "image_display":
+                            if ws:
+                                try:
+                                    await ws.send_text(raw)
+                                    return
+                                except Exception as _img_err:
+                                    logger.debug(
+                                        f"[TTS-DBG] image_display 실시간 전송 실패, capture fallback: {_img_err}"
+                                    )
+                            captured.append(raw)
                             return
                     except Exception:
                         pass
@@ -691,7 +704,7 @@ class WebSocketHandler:
             """먼저 완성된 슬롯을 먼저 재생한다 (completion-order playback)."""
             import time
             nonlocal _play_idx
-            SLOT_TIMEOUT = 3600.0  # 슬롯당 최대 대기 시간 (초) — 1시간
+            SLOT_TIMEOUT = 7200.0  # 슬롯당 최대 대기 시간 (초) — 2시간
             # pending: (messages, ready_event, enqueued_at)
             pending: list[tuple[list, asyncio.Event, float]] = []
 
@@ -717,7 +730,7 @@ class WebSocketHandler:
                     _, _, enqueued_at = pending[i]
                     if now - enqueued_at > SLOT_TIMEOUT:
                         pending.pop(i)
-                        logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >3600s) — skipping")
+                        logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >7200s) — skipping")
                         # slot timeout 시 claude -p 프로세스도 종료
                         try:
                             if self.client_connections:

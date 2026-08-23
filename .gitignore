@@ -80,3 +80,13 @@ mcp_servers.json
 *.lock
 
 frontend
+
+# Claude Code local settings
+.claude/
+
+# Local model dicts (per-machine)
+model_dict_mao.json
+model_dict_wv.json
+
+# yt-dlp binary (local install)
+yt-dlp_macos
