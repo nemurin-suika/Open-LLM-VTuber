@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,7 +99,8 @@ def _decode_to_wav(b64_data: str, mime_type: str) -> Optional[Path]:
             "-ac", "1", "-ar", "16000",
             "-vn", str(wav_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        # 오디오 길이가 최대 600초까지 늘어날 수 있어 변환 타임아웃도 함께 상향
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0 or not wav_path.exists() or wav_path.stat().st_size < 1000:
             stderr_full = result.stderr.decode("utf-8", errors="replace").strip()
             logger.warning(
@@ -131,7 +133,7 @@ async def _aa_separate(client: httpx.AsyncClient, wav_path: Path) -> Optional[Pa
                 f"{_ANALYZE_AUDIO_URL}/separate",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 data={"stem": "vocals"},
-                timeout=120.0,
+                timeout=600.0,
             )
         r.raise_for_status()
         out = wav_path.with_name(f"{wav_path.stem}_vocals.wav")
@@ -149,7 +151,7 @@ async def _aa_diarize(client: httpx.AsyncClient, wav_path: Path) -> Optional[dic
             r = await client.post(
                 f"{_ANALYZE_AUDIO_URL}/diarize",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
-                timeout=180.0,
+                timeout=600.0,
             )
         r.raise_for_status()
         return r.json()
@@ -173,7 +175,7 @@ async def _aa_ser(
                     )
                 }
             r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/ser", files=files, data=data, timeout=120.0,
+                f"{_ANALYZE_AUDIO_URL}/ser", files=files, data=data, timeout=600.0,
             )
         r.raise_for_status()
         return r.json()
@@ -189,7 +191,7 @@ async def _aa_bgm(client: httpx.AsyncClient, wav_path: Path) -> Optional[dict]:
             r = await client.post(
                 f"{_ANALYZE_AUDIO_URL}/bgm_analyze",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
-                timeout=90.0,
+                timeout=300.0,
             )
         r.raise_for_status()
         return r.json()
@@ -213,7 +215,7 @@ async def _aa_transcribe(client: httpx.AsyncClient, wav_path: Path) -> list[dict
                 f"{_ANALYZE_AUDIO_URL}/transcribe",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 data={"language": "", "vad_filter": "false"},
-                timeout=180.0,
+                timeout=600.0,
             )
         r.raise_for_status()
         return r.json()
@@ -317,26 +319,40 @@ async def analyze_system_audio(b64_data: str, mime_type: str = "audio/webm") -> 
 
     빈 문자열을 반환하면 분석할 게 없거나 실패한 것이므로 호출자는 태그를 추가하지 말 것.
     """
+    t_start = time.monotonic()
     wav_path = await asyncio.to_thread(_decode_to_wav, b64_data, mime_type)
     if not wav_path:
         return ""
+
+    # 16kHz mono 16bit 기준 32000 B/s → WAV 크기로 대략적인 길이를 역산
+    try:
+        audio_seconds = max(0.0, (wav_path.stat().st_size - 44) / 32000.0)
+    except Exception:
+        audio_seconds = 0.0
+    logger.info(
+        f"[SysAudio] 분석 시작: 오디오 약 {audio_seconds:.0f}초, "
+        f"디코딩 {time.monotonic() - t_start:.1f}s"
+    )
 
     vocals_path: Optional[Path] = None
     try:
         async with httpx.AsyncClient() as client:
             # 1. 보컬 분리 (실패해도 원본으로 계속)
+            t_step = time.monotonic()
             vocals_path = await _aa_separate(client, wav_path)
             target = vocals_path or wav_path
             logger.info(
                 f"[SysAudio] 분리 결과: vocals={'있음' if vocals_path else '없음'}, "
-                f"target={target.name}"
+                f"target={target.name}, {time.monotonic() - t_step:.1f}s"
             )
 
             # 2. Whisper 전사: 원본으로 먼저 시도. 비어있고 vocals가 있으면 vocals로 재시도.
+            t_step = time.monotonic()
             whisper_segs = await _aa_transcribe(client, wav_path)
             logger.info(
                 f"[SysAudio] Whisper (원본) segments={len(whisper_segs)}, "
-                f"first_text={(whisper_segs[0].get('text', '')[:80] if whisper_segs else '')!r}"
+                f"first_text={(whisper_segs[0].get('text', '')[:80] if whisper_segs else '')!r}, "
+                f"{time.monotonic() - t_step:.1f}s"
             )
             if not whisper_segs and vocals_path:
                 whisper_segs = await _aa_transcribe(client, vocals_path)
@@ -346,17 +362,27 @@ async def analyze_system_audio(b64_data: str, mime_type: str = "audio/webm") -> 
                 )
 
             # 3. 화자 분리 (vocals 우선 — 발화 구간 정렬에 더 정확)
+            t_step = time.monotonic()
             diarize_data = await _aa_diarize(client, target)
             diarize_segments = (diarize_data or {}).get("segments", []) if diarize_data else []
-            logger.info(f"[SysAudio] Diarize segments={len(diarize_segments)}")
+            logger.info(
+                f"[SysAudio] Diarize segments={len(diarize_segments)}, "
+                f"{time.monotonic() - t_step:.1f}s"
+            )
 
             # 4. SER
+            t_step = time.monotonic()
             ser_segs = diarize_segments or whisper_segs
             ser_results = await _aa_ser(client, target, ser_segs) if ser_segs else None
-            logger.info(f"[SysAudio] SER results={len(ser_results) if ser_results else 0}")
+            logger.info(
+                f"[SysAudio] SER results={len(ser_results) if ser_results else 0}, "
+                f"{time.monotonic() - t_step:.1f}s"
+            )
 
             # 5. BGM (원본 오디오)
+            t_step = time.monotonic()
             bgm = await _aa_bgm(client, wav_path)
+            logger.info(f"[SysAudio] BGM 분석 {time.monotonic() - t_step:.1f}s")
 
         utterances = _build_utterances(diarize_segments, whisper_segs, ser_results or [])
         non_empty = sum(1 for u in utterances if u.text)
@@ -367,7 +393,8 @@ async def analyze_system_audio(b64_data: str, mime_type: str = "audio/webm") -> 
         if text_block:
             logger.info(
                 f"[SysAudio] 분석 완료: 발화 {non_empty}개, "
-                f"BGM={'있음' if bgm else '없음'}, 텍스트={len(text_block)}자"
+                f"BGM={'있음' if bgm else '없음'}, 텍스트={len(text_block)}자, "
+                f"오디오 {audio_seconds:.0f}초 / 총 소요 {time.monotonic() - t_start:.1f}s"
             )
         else:
             logger.warning(

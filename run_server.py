@@ -166,6 +166,9 @@ def run(console_log_level: str):
         host=server_config.host,
         port=server_config.port,
         log_level=console_log_level.lower(),
+        # 과거 스크린샷 다수 + 최대 600초 시스템 오디오(base64)가 한 메시지에 담기므로
+        # uvicorn 기본 16MB로는 부족할 수 있어 64MB로 상향
+        ws_max_size=64 * 1024 * 1024,
     )
 
 
