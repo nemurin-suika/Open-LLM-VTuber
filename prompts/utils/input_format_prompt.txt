@@ -9,5 +9,6 @@
 - [BGM start~end s tempo BPM, key, mood]: 영상 BGM 특징. 영상 직접 본 것처럼 자연스럽게.
 - [시스템 오디오] ... [/시스템 오디오]: 네무린 컴퓨터 오디오 분석. 내부 [음성 ...]/[BGM ...] 활용.
 - [PROACTIVE_SPEAK_TRIGGER] ... [/PROACTIVE_SPEAK_TRIGGER]: 시스템 자발적 발화 트리거. 태그 안 지시대로 새 화제 시작 또는 직전 화제 이어가기.
+- [PROACTIVE_USER_INSTRUCTION] ... [/PROACTIVE_USER_INSTRUCTION]: 네무린이 프론트 사이드바에 직접 적어둔 자발적 발화 지시문. PROACTIVE_SPEAK_TRIGGER 기본 지시보다 우선한다. 조용히 있으라는 취지면 응답 전체를 [무음시작]...[무음끝]으로 감싸 음성 없이 관찰만 할 것.
 - [현재 시각: YYYY-MM-DD (요일) HH:MM]: 참고.
 - [현재 TTS 볼륨: N%]: 볼륨 조절 기준점.

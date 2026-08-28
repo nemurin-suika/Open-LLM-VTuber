@@ -1195,6 +1195,16 @@ class WebSocketHandler:
             except Exception as e:
                 logger.error(f"Proactive 입력 생성 실패: {e}")
                 user_input = "[PROACTIVE_SPEAK_TRIGGER]\n뭔가 자연스럽게 혼잣말을 해줘.\n[/PROACTIVE_SPEAK_TRIGGER]"
+            # 프론트 사이드바에서 입력한 지시문을 기본 프롬프트 뒤에 덧붙인다
+            instruction = data.get("proactive_instruction")
+            if isinstance(instruction, str) and instruction.strip():
+                user_input = (
+                    f"{user_input}\n"
+                    f"[PROACTIVE_USER_INSTRUCTION]\n"
+                    f"{instruction.strip()}\n"
+                    f"[/PROACTIVE_USER_INSTRUCTION]"
+                )
+                logger.info(f"[Proactive] 프론트 지시문 적용: {instruction.strip()[:60]}")
             metadata = {
                 "proactive_speak": True,
                 "proactive_mode": mode,

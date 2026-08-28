@@ -159,6 +159,15 @@ async def handle_conversation_trigger(
             if mode not in ("broadcast", "private"):
                 mode = "broadcast"
             user_input = _build_proactive_user_input(context, client_uid, mode=mode)
+            # 프론트 사이드바 지시문 (websocket_handler와 동일 규칙)
+            _instruction = data.get("proactive_instruction")
+            if isinstance(_instruction, str) and _instruction.strip():
+                user_input = (
+                    f"{user_input}\n"
+                    f"[PROACTIVE_USER_INSTRUCTION]\n"
+                    f"{_instruction.strip()}\n"
+                    f"[/PROACTIVE_USER_INSTRUCTION]"
+                )
             metadata = {
                 "proactive_speak": True,
                 "proactive_mode": mode,

@@ -1,3 +1,4 @@
+import re
 from typing import AsyncIterator, Tuple, Callable, List, Union, Dict, Any
 from functools import wraps
 from .output_types import Actions, SentenceOutput, DisplayText
@@ -7,6 +8,26 @@ from ..config_manager import TTSPreprocessorConfig
 from ..utils.sentence_divider import SentenceDivider
 from ..utils.sentence_divider import SentenceWithTags, TagState
 from loguru import logger
+
+
+# TTS 억제 구간 태그. [무음시작] ... [무음끝] 사이는 자막·Live2D에는 그대로 남기고
+# 음성만 읽지 않는다. 링크나 경로처럼 소리내면 곤란한 내용, 방해 금지 상황에 사용.
+# 구간은 문장 경계를 넘어 이어질 수 있으므로 스트림 단위로 상태를 유지한다.
+_SILENT_TAG_RE = re.compile(r"\[\s*무음\s*(시작|끝)\s*\]")
+
+
+def _strip_silent_segments(text: str, silent: bool) -> Tuple[str, bool]:
+    """무음 구간을 제거한 발화용 텍스트와, 다음 문장으로 이어질 무음 상태를 반환."""
+    parts: List[str] = []
+    pos = 0
+    for m in _SILENT_TAG_RE.finditer(text):
+        if not silent:
+            parts.append(text[pos : m.start()])
+        silent = m.group(1) == "시작"
+        pos = m.end()
+    if not silent:
+        parts.append(text[pos:])
+    return "".join(parts), silent
 
 
 def sentence_divider(
@@ -191,6 +212,8 @@ def tts_filter(
         ) -> AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]:  # Yield type hint
             stream = func(*args, **kwargs)
             config = tts_preprocessor_config or TTSPreprocessorConfig()
+            # [무음시작]/[무음끝] 구간 상태 (문장을 넘어 이어짐)
+            silent = False
 
             async for item in stream:
                 if (
@@ -199,11 +222,17 @@ def tts_filter(
                     and isinstance(item[1], DisplayText)
                 ):
                     sentence, display, actions = item
+                    # 무음 구간을 걷어낸 발화용 텍스트를 먼저 만든다
+                    speakable, silent = _strip_silent_segments(display.text, silent)
+                    # 자막에서는 태그 문자열만 지우고 내용은 그대로 보여준다
+                    display.text = _SILENT_TAG_RE.sub("", display.text)
                     if any(tag.name == "think" for tag in sentence.tags):
+                        tts = ""
+                    elif not speakable.strip():
                         tts = ""
                     else:
                         tts = filter_text(
-                            text=display.text,
+                            text=speakable,
                             remove_special_char=config.remove_special_char,
                             ignore_brackets=config.ignore_brackets,
                             ignore_parentheses=config.ignore_parentheses,
