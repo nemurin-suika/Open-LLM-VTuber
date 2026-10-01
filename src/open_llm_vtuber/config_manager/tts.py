@@ -1,6 +1,6 @@
 # config_manager/tts.py
 from pydantic import ValidationInfo, Field, model_validator
-from typing import Literal, Optional, Dict, ClassVar
+from typing import Literal, Optional, Dict, List, ClassVar
 from .i18n import I18nMixin, Description
 
 
@@ -181,10 +181,27 @@ class GPTSoVITSConfig(I18nMixin):
     batch_size: str = Field(..., alias="batch_size")
     media_type: str = Field(..., alias="media_type")
     streaming_mode: str = Field(..., alias="streaming_mode")
+    fallback_api_urls: List[str] = Field(
+        default_factory=list, alias="fallback_api_urls"
+    )
+    connect_timeout: float = Field(3.0, alias="connect_timeout")
+    read_timeout: float = Field(600.0, alias="read_timeout")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "api_url": Description(
             en="URL of the GPT-SoVITS API endpoint", zh="GPT-SoVITS API 端点的 URL"
+        ),
+        "fallback_api_urls": Description(
+            en="Fallback GPT-SoVITS endpoints, tried in order when the primary is unreachable",
+            zh="备用 GPT-SoVITS 端点，主端点不可用时按顺序尝试",
+        ),
+        "connect_timeout": Description(
+            en="Connection timeout in seconds before failing over to a fallback",
+            zh="切换到备用端点前的连接超时（秒）",
+        ),
+        "read_timeout": Description(
+            en="Read timeout in seconds for the synthesis response",
+            zh="合成响应的读取超时（秒）",
         ),
         "text_lang": Description(en="Language of the input text", zh="输入文本的语言"),
         "ref_audio_path": Description(

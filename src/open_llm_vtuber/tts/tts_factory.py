@@ -87,6 +87,9 @@ class TTSFactory:
                 batch_size=kwargs.get("batch_size"),
                 media_type=kwargs.get("media_type"),
                 streaming_mode=kwargs.get("streaming_mode"),
+                fallback_api_urls=kwargs.get("fallback_api_urls") or [],
+                connect_timeout=kwargs.get("connect_timeout") or 3.0,
+                read_timeout=kwargs.get("read_timeout") or 600.0,
             )
         elif engine_type == "siliconflow_tts":
             from .siliconflow_tts import SiliconFlowTTS

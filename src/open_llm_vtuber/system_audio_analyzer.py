@@ -31,14 +31,99 @@ _ANALYZE_AUDIO_URL = os.environ.get(
     "ANALYZE_AUDIO_URL", "http://192.168.0.15:9881"
 ).rstrip("/")
 
+# 1순위 서버가 연결 불가일 때 순서대로 시도할 예비 주소
+# (conf.yaml의 system_config.analyze_audio_fallback_urls)
+_ANALYZE_AUDIO_FALLBACK_URLS: list[str] = [
+    u.strip().rstrip("/")
+    for u in os.environ.get("ANALYZE_AUDIO_FALLBACK_URLS", "").split(",")
+    if u.strip()
+]
 
-def set_analyze_audio_url(url: str) -> None:
+# 연결 실패(거부/끊김)는 이 시간 안에 드러난다. read 타임아웃까지 기다리지 않고 바로 폴백.
+_CONNECT_TIMEOUT = 3.0
+
+# 폴백 시 다음 후보로 넘어가는 연결 계층 예외
+_CONNECT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.PoolTimeout,
+)
+
+
+def set_analyze_audio_url(url: str, fallback_urls: Optional[list[str]] = None) -> None:
     """conf.yaml에서 읽은 analyze-audio URL을 모듈에 주입. 환경 변수가 있으면 무시."""
-    global _ANALYZE_AUDIO_URL
-    if os.environ.get("ANALYZE_AUDIO_URL"):
-        return  # 환경 변수가 더 우선
-    if url:
-        _ANALYZE_AUDIO_URL = url.rstrip("/")
+    global _ANALYZE_AUDIO_URL, _ANALYZE_AUDIO_FALLBACK_URLS
+    if not os.environ.get("ANALYZE_AUDIO_URL"):
+        if url:
+            _ANALYZE_AUDIO_URL = url.rstrip("/")
+    if not os.environ.get("ANALYZE_AUDIO_FALLBACK_URLS"):
+        if fallback_urls is not None:
+            _ANALYZE_AUDIO_FALLBACK_URLS = [
+                u.rstrip("/") for u in fallback_urls if u
+            ]
+
+
+def _candidate_bases() -> list[str]:
+    """시도 순서대로 중복 제거한 후보 베이스 URL 목록."""
+    bases: list[str] = []
+    for base in [_ANALYZE_AUDIO_URL, *_ANALYZE_AUDIO_FALLBACK_URLS]:
+        if base and base not in bases:
+            bases.append(base)
+    return bases
+
+
+async def _aa_post(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    files: dict,
+    data: Optional[dict] = None,
+    timeout: float = 600.0,
+) -> httpx.Response:
+    """analyze-audio 서버에 POST. 1순위가 연결 불가면 예비 주소로 즉시 폴백.
+
+    - 연결 거부/끊김/연결 타임아웃이면 다음 후보로 넘어간다.
+    - 응답이 왔는데 상태 코드가 오류여도 다음 후보를 시도한다 (모델 로드 실패 등).
+    - 폴백 상태는 보존하지 않는다. 매 요청마다 항상 1순위부터 다시 시도한다.
+    - 모든 후보가 실패하면 마지막 예외를 그대로 올린다 (호출자가 로깅/무시 처리).
+    """
+    bases = _candidate_bases()
+    last_exc: Optional[Exception] = None
+
+    for idx, base in enumerate(bases):
+        has_next = idx + 1 < len(bases)
+        try:
+            r = await client.post(
+                f"{base}{path}",
+                files=files,
+                data=data,
+                timeout=httpx.Timeout(timeout, connect=_CONNECT_TIMEOUT),
+            )
+            r.raise_for_status()
+            if idx > 0:
+                logger.info(f"[SysAudio] 폴백 서버로 {path} 성공: {base}")
+            return r
+        except _CONNECT_ERRORS as e:
+            last_exc = e
+            if has_next:
+                logger.warning(
+                    f"[SysAudio] {base}{path} 연결 실패 ({type(e).__name__}) "
+                    f"→ 폴백 {bases[idx + 1]} 시도"
+                )
+            continue
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if has_next:
+                logger.warning(
+                    f"[SysAudio] {base}{path} 응답 오류 (status "
+                    f"{e.response.status_code}) → 폴백 {bases[idx + 1]} 시도"
+                )
+            continue
+
+    raise last_exc if last_exc else RuntimeError("analyze-audio 후보 주소 없음")
 
 
 @dataclass
@@ -129,13 +214,13 @@ async def _aa_separate(client: httpx.AsyncClient, wav_path: Path) -> Optional[Pa
     """/separate → 보컬만 분리한 WAV 경로. 실패 시 None."""
     try:
         with open(wav_path, "rb") as f:
-            r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/separate",
+            r = await _aa_post(
+                client,
+                "/separate",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 data={"stem": "vocals"},
                 timeout=600.0,
             )
-        r.raise_for_status()
         out = wav_path.with_name(f"{wav_path.stem}_vocals.wav")
         out.write_bytes(r.content)
         return out
@@ -148,12 +233,12 @@ async def _aa_diarize(client: httpx.AsyncClient, wav_path: Path) -> Optional[dic
     """/diarize → {segments, embeddings}. 실패 시 None."""
     try:
         with open(wav_path, "rb") as f:
-            r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/diarize",
+            r = await _aa_post(
+                client,
+                "/diarize",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 timeout=600.0,
             )
-        r.raise_for_status()
         return r.json()
     except Exception as e:
         logger.warning(f"[SysAudio] /diarize 실패 (무시): {e}")
@@ -174,10 +259,9 @@ async def _aa_ser(
                         [{"start": s["start"], "end": s["end"]} for s in segments]
                     )
                 }
-            r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/ser", files=files, data=data, timeout=600.0,
+            r = await _aa_post(
+                client, "/ser", files=files, data=data, timeout=600.0,
             )
-        r.raise_for_status()
         return r.json()
     except Exception as e:
         logger.warning(f"[SysAudio] /ser 실패 (무시): {e}")
@@ -188,12 +272,12 @@ async def _aa_bgm(client: httpx.AsyncClient, wav_path: Path) -> Optional[dict]:
     """/bgm_analyze → BGM 특징."""
     try:
         with open(wav_path, "rb") as f:
-            r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/bgm_analyze",
+            r = await _aa_post(
+                client,
+                "/bgm_analyze",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 timeout=300.0,
             )
-        r.raise_for_status()
         return r.json()
     except Exception as e:
         logger.warning(f"[SysAudio] /bgm_analyze 실패 (무시): {e}")
@@ -211,13 +295,13 @@ async def _aa_transcribe(client: httpx.AsyncClient, wav_path: Path) -> list[dict
     """
     try:
         with open(wav_path, "rb") as f:
-            r = await client.post(
-                f"{_ANALYZE_AUDIO_URL}/transcribe",
+            r = await _aa_post(
+                client,
+                "/transcribe",
                 files={"audio": (wav_path.name, f.read(), "audio/wav")},
                 data={"language": "", "vad_filter": "false"},
                 timeout=600.0,
             )
-        r.raise_for_status()
         return r.json()
     except Exception as e:
         logger.warning(f"[SysAudio] /transcribe 실패 (무시): {e}")

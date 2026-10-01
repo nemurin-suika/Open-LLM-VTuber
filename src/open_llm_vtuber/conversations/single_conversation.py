@@ -92,9 +92,19 @@ async def process_single_conversation(
             try:
                 from ..system_audio_analyzer import analyze_system_audio, set_analyze_audio_url
                 _aa_url = getattr(context.system_config, "analyze_audio_url", None) if context else None
-                if _aa_url:
-                    set_analyze_audio_url(_aa_url)
-                logger.info(f"[SysAudio] 분석 시작 ({len(_sys_audio['data'])}B → {_aa_url or 'default'})")
+                _aa_fallbacks = (
+                    getattr(context.system_config, "analyze_audio_fallback_urls", None)
+                    if context
+                    else None
+                ) or []
+                if _aa_url or _aa_fallbacks:
+                    set_analyze_audio_url(_aa_url or "", list(_aa_fallbacks))
+                logger.info(
+                    f"[SysAudio] 분석 시작 ({len(_sys_audio['data'])}B → "
+                    f"{_aa_url or 'default'}"
+                    + (f", 폴백 {', '.join(_aa_fallbacks)}" if _aa_fallbacks else "")
+                    + ")"
+                )
                 _audio_block = await analyze_system_audio(
                     _sys_audio["data"],
                     _sys_audio.get("mime_type", "audio/webm"),

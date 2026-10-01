@@ -1,6 +1,6 @@
 # config_manager/system.py
 from pydantic import Field, model_validator, BaseModel
-from typing import Dict, ClassVar
+from typing import Dict, List, ClassVar
 from .i18n import I18nMixin, Description
 
 
@@ -42,6 +42,9 @@ class SystemConfig(I18nMixin):
     analyze_audio_url: str = Field(
         "http://192.168.0.15:9881", alias="analyze_audio_url"
     )
+    analyze_audio_fallback_urls: List[str] = Field(
+        default_factory=list, alias="analyze_audio_fallback_urls"
+    )
     wind_effect: WindEffectConfig = Field(
         default_factory=WindEffectConfig, alias="wind_effect"
     )
@@ -71,6 +74,10 @@ class SystemConfig(I18nMixin):
         "analyze_audio_url": Description(
             en="URL of the analyze-audio server (Demucs/pyannote/SER/BGM/Whisper). Used for system audio analysis.",
             zh="analyze-audio 服务器 URL (Demucs/pyannote/SER/BGM/Whisper)。用于系统音频分析。",
+        ),
+        "analyze_audio_fallback_urls": Description(
+            en="Fallback analyze-audio servers, tried in order when the primary is unreachable.",
+            zh="备用 analyze-audio 服务器，主服务器不可用时按顺序尝试。",
         ),
     }
 
