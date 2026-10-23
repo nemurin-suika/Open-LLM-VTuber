@@ -1,8 +1,22 @@
 #!/bin/bash
 
-pushd frontend
-npm run build:web
-popd
+# --skip-build: 프론트엔드 빌드를 건너뛴다. 백엔드만 재기동할 때 빌드가
+# 매번 수십 초를 먹으므로 launchd 재기동 경로(_mz_setup/olv.sh)는 기본으로 이걸 쓴다.
+# 프론트를 수정했으면 플래그 없이 실행하거나 frontend에서 직접 npm run build:web.
+SKIP_BUILD=0
+for arg in "$@"; do
+    case $arg in
+        --skip-build) SKIP_BUILD=1 ;;
+    esac
+done
+
+if [ "$SKIP_BUILD" = "1" ]; then
+    echo "[Frontend] --skip-build 지정됨 → 빌드 생략"
+else
+    pushd frontend
+    npm run build:web
+    popd
+fi
 
 # ahttp_client 1.0.5 버그 패치: pydantic 2.12+에서 by_alias/by_name=False로 model_validate
 # 호출 시 에러 발생. None으로 바꿔서 pydantic이 모델 config 기준으로 동작하게 함.
