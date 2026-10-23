@@ -111,6 +111,34 @@ _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 _PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 신호: letta 서버의 claude_cli_client.py가 polling → proc.kill()
 _ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
+# ── 다중 세션(letta conversation) 대응 ──────────────────────────────────────
+# letta 쪽 claude_cli_client.py의 progress_notify_file/abort_flag_file과 완전히 같은 규칙.
+# 두 프로세스가 같은 경로를 계산해야 알림/인터럽트가 세션별로 올바르게 전달된다.
+_DEFAULT_SESSION_KEY = "default"
+_SESSION_KEY_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_session_key(raw: Optional[str]) -> str:
+    if not raw:
+        return _DEFAULT_SESSION_KEY
+    key = _SESSION_KEY_UNSAFE_RE.sub("_", str(raw).strip())[:64]
+    return key or _DEFAULT_SESSION_KEY
+
+
+def progress_notify_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
+    """세션별 중간 알림 파일 경로 (letta 측과 동일 규칙)."""
+    key = _sanitize_session_key(session_key)
+    if key == _DEFAULT_SESSION_KEY:
+        return _PROGRESS_NOTIFY_FILE
+    return f"/tmp/mizuki_progress_notify_{key}.jsonl"
+
+
+def abort_flag_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
+    """세션별 인터럽트 플래그 파일 경로 (letta 측과 동일 규칙)."""
+    key = _sanitize_session_key(session_key)
+    if key == _DEFAULT_SESSION_KEY:
+        return _ABORT_FLAG_FILE
+    return f"/tmp/mizuki_abort_{key}.flag"
 # ADB 스크린샷 감시: /tmp/*.png 전체 감시 → 변경/신규 파일 자동 전송
 _ADB_SCREENSHOT_DIR = "/tmp"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
@@ -823,6 +851,7 @@ class LettaAgent(AgentInterface):
         host: str = "localhost",
         port: int = 8283,
         context_window_limit: Optional[int] = None,
+        conversation_id: str = _DEFAULT_SESSION_KEY,
     ):
         super().__init__()
         self.url = f"http://{host}:{port}"
@@ -836,12 +865,22 @@ class LettaAgent(AgentInterface):
 
         self.client = AsyncLetta(base_url=self.url, timeout=7200)
         self.id = id
+        # 다중 세션: letta conversation 하나 = 프론트 세션 하나.
+        # "default"는 기존 단일 세션(messages.conversation_id IS NULL)을 가리키는 특수 키로
+        # letta 서버가 agent-direct 모드로 처리한다 → 기존 대화 내역이 그대로 이어진다.
+        self.conversation_id: str = conversation_id or _DEFAULT_SESSION_KEY
+        self._session_key: str = _sanitize_session_key(self.conversation_id)
+        self._notify_file: str = progress_notify_file(self._session_key)
+        self._abort_file: str = abort_flag_file(self._session_key)
         # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
         self._abort_flag: bool = False
         # ADB 스크린샷 실시간 전송용 WebSocket send 함수 (single_conversation.py에서 주입)
         # 설정 시 generator yield 방식 대신 직접 WebSocket 전송으로 즉시 이미지 전달
         self._websocket_send_fn: Optional[Any] = None
-        logger.info(f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}")
+        logger.info(
+            f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}, "
+            f"conversation_id={self.conversation_id}"
+        )
 
         # Build the decorated pipeline: raw str tokens → SentenceOutput
         self._chat = tts_filter(tts_preprocessor_config)(  # type: ignore[arg-type]
@@ -868,9 +907,9 @@ class LettaAgent(AgentInterface):
         """
         self._abort_flag = True
         try:
-            with open(_ABORT_FLAG_FILE, "w", encoding="utf-8") as _af:
+            with open(self._abort_file, "w", encoding="utf-8") as _af:
                 _af.write(str(_time.time()))
-            logger.info(f"[LettaAgent] abort 파일 생성: {_ABORT_FLAG_FILE}")
+            logger.info(f"[LettaAgent] abort 파일 생성: {self._abort_file}")
         except Exception as _e:
             logger.warning(f"[LettaAgent] abort 파일 생성 실패 (무시): {_e}")
         logger.info("[LettaAgent] 인터럽트 신호 수신 → _abort_flag + abort 파일 설정")
@@ -887,8 +926,8 @@ class LettaAgent(AgentInterface):
         # 새 대화 시작 시 abort 플래그 및 파일 초기화
         self._abort_flag = False
         try:
-            if os.path.exists(_ABORT_FLAG_FILE):
-                os.unlink(_ABORT_FLAG_FILE)
+            if os.path.exists(self._abort_file):
+                os.unlink(self._abort_file)
         except Exception:
             pass
 
@@ -937,7 +976,11 @@ class LettaAgent(AgentInterface):
         else:
             input_content = text
 
-        stream = await self.client.agents.messages.create(
+        # agents.messages.create는 letta에서 deprecated → conversations 엔드포인트 사용.
+        # conversation_id="default" + agent_id는 letta의 agent-direct 모드로,
+        # 기존 단일 세션 대화 내역(conversation_id IS NULL)을 그대로 이어받는다.
+        stream = await self.client.conversations.messages.create(
+            self.conversation_id,
             agent_id=self.id,
             streaming=True,  # type: ignore[call-overload]
             stream_tokens=True,
@@ -955,7 +998,7 @@ class LettaAgent(AgentInterface):
         # -----------------------------------------------------------------------
         # 중간 진행 알림 실시간 표시:
         # claude_cli_client.py가 --output-format stream-json으로 실행하면서
-        # [알림: ...] 감지 즉시 _PROGRESS_NOTIFY_FILE에 JSONL로 기록한다.
+        # [알림: ...] 감지 즉시 세션별 알림 파일(self._notify_file)에 JSONL로 기록한다.
         # 이 polling task가 0.3초마다 파일을 읽어 _notify_queue에 넣고,
         # Letta 스트림 루프에서 pending 알림을 먼저 yield한다.
         # -----------------------------------------------------------------------
@@ -975,7 +1018,7 @@ class LettaAgent(AgentInterface):
             nonlocal _notify_file_offset
             while not _polling_stop.is_set():
                 try:
-                    with open(_PROGRESS_NOTIFY_FILE, "r", encoding="utf-8") as _pf:
+                    with open(self._notify_file, "r", encoding="utf-8") as _pf:
                         _pf.seek(_notify_file_offset)
                         for _line in _pf:
                             _line = _line.strip()

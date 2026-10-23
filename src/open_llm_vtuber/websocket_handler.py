@@ -442,7 +442,13 @@ class WebSocketHandler:
 
                 # [알림: ...] 중간 진행 알림을 캡처 버퍼 우회해 실시간 전송
                 import os as _os_notify
-                _NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
+                # 다중 세션: 알림 파일은 letta conversation 단위로 분리되어 있다.
+                # 이 클라이언트가 쓰는 agent의 경로를 그대로 따라간다(없으면 단일 세션 기본 경로).
+                _NOTIFY_FILE = getattr(
+                    getattr(context, "agent_engine", None),
+                    "_notify_file",
+                    "/tmp/mizuki_progress_notify.jsonl",
+                )
 
                 async def _poll_and_send_notify() -> None:
                     while True:
