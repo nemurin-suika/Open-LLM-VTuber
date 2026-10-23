@@ -2,6 +2,8 @@ from typing import Dict, List, Optional, Callable, TypedDict
 from fastapi import WebSocket, WebSocketDisconnect
 import asyncio
 import json
+import os
+import time
 from enum import Enum
 import numpy as np
 from loguru import logger
@@ -30,6 +32,28 @@ from .conversations.conversation_handler import (
 from .conversations.single_conversation import process_single_conversation
 from .message_handler import message_handler
 from .tool_approval import ToolApprovalManager
+
+
+# ── 턴 완료 마커 ──────────────────────────────────────────────────────────────
+# 안전 재기동(_mz_setup/restart-stack.sh)이 "미즈키가 말을 다 전했는지"를
+# 판정하는 신호. claude -p 프로세스의 종료는 턴 종료가 아니다. 그 뒤에
+# letta → OLV → TTS 합성 → 프론트 전송 → 재생이 남아 있어서, claude 소멸
+# 직후 스택을 종료하면 발화가 통째로 유실된다(2026-10-24 01:31 실제 발생).
+#
+#   delivered : captured replay 완료 = 오디오 payload 가 프론트로 전부 전송됨
+#   played    : 프론트가 frontend-playback-complete 를 보냄 = 재생까지 끝남
+_TURN_MARK_FILE = os.environ.get("MIZUKI_TURN_MARK_FILE", "/tmp/mizuki_turn_done")
+
+
+def mark_turn_stage(stage: str) -> None:
+    """턴 진행 단계를 마커 파일에 기록한다. 실패해도 대화에 영향 없음."""
+    try:
+        tmp = f"{_TURN_MARK_FILE}.tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{stage} {time.time():.3f}\n")
+        os.replace(tmp, _TURN_MARK_FILE)
+    except Exception as e:  # pragma: no cover - 마커는 보조 기능
+        logger.debug(f"[TurnMark] {stage} 기록 실패: {e}")
 
 
 class MessageType(Enum):
@@ -279,6 +303,9 @@ class WebSocketHandler:
         else:
             if msg_type != "frontend-playback-complete":
                 logger.warning(f"Unknown message type: {msg_type}")
+            else:
+                # 프론트가 오디오 재생을 끝냈다 = 네무린이 발화를 다 들었다.
+                mark_turn_stage("played")
 
     async def _handle_group_operation(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -843,6 +870,7 @@ class WebSocketHandler:
                 try:
                     await _replay(msgs, idx)
                     logger.info(f"[TTS-DBG #{idx}] ✓ replay done")
+                    mark_turn_stage("delivered")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
