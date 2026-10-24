@@ -293,6 +293,9 @@ def _ask_backend(tool_name: str, tool_input: dict, rule_options: list, transcrip
             "rule_options": [{"id": o["id"], "label": o["label"]} for o in rule_options],
             "ttl_days": TTL_DAYS,
             "intent": _read_last_intent(transcript_path),  # 미즈키의 reasoning을 승인 팝업에 표시
+            # 다중 세션: letta claude_cli_client 가 subprocess env 로 넘긴 세션 키.
+            # 백엔드가 세션 이름으로 환산해 "어느 방의 승인 요청인지" 팝업에 표시한다.
+            "session_key": os.environ.get("MIZUKI_SESSION_KEY", ""),
         },
         ensure_ascii=False,
     ).encode("utf-8")

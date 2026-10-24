@@ -125,6 +125,36 @@ class WebSocketHandler:
         agent = getattr(self.default_context_cache, "agent_engine", None)
         return str(getattr(agent, "active_conversation_id", "default") or "default")
 
+    def _any_agent(self) -> Optional[Any]:
+        """세션 메타를 물어볼 수 있는 agent 인스턴스 하나."""
+        for ctx in self.client_contexts.values():
+            agent = getattr(ctx, "agent_engine", None)
+            if agent is not None:
+                return agent
+        return getattr(self.default_context_cache, "agent_engine", None)
+
+    async def resolve_session_label(self, session_key: str) -> tuple:
+        """도구 승인 hook 이 보낸 세션 키 → (conversation_id, 세션 이름).
+
+        승인 팝업에 "어느 방에서 올라온 요청인지" 적어주기 위한 변환.
+        모르는 키거나 해석에 실패하면 활성 세션 기준으로 돌려준다.
+        """
+        agent = self._any_agent()
+        resolver = getattr(agent, "resolve_session_by_key", None)
+        if session_key and callable(resolver):
+            try:
+                return await resolver(session_key)
+            except Exception as e:
+                logger.debug(f"[ToolApproval] 세션 키 해석 실패 (key={session_key}): {e}")
+        active = self._active_session_id()
+        name = ""
+        if callable(resolver):
+            try:
+                _, name = await resolver(active)
+            except Exception:
+                name = ""
+        return active, name
+
     @staticmethod
     def _mark_replay_only(messages: List[str]) -> List[str]:
         """자막을 채팅 기록에 또 쌓지 않도록 표시한 메시지 목록.

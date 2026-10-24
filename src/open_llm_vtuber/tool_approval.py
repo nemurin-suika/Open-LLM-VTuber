@@ -72,6 +72,10 @@ class ToolApprovalManager:
                 "ttl_days": payload.get("ttl_days", 1),
                 # 미즈키가 이 도구를 쓰려는 이유 (reasoning)
                 "intent": payload.get("intent", ""),
+                # 다중 세션: 이 요청이 올라온 세션. 두 방에서 동시에 승인이 떠도
+                # 어느 쪽 작업인지 팝업에서 구분할 수 있게 한다.
+                "session_id": payload.get("session_id", ""),
+                "session_name": payload.get("session_name", ""),
             },
             ensure_ascii=False,
         )
@@ -90,6 +94,7 @@ class ToolApprovalManager:
 
         logger.info(
             f"[ToolApproval] 승인 요청 전송 (tool={payload.get('tool_name')}, "
+            f"session={payload.get('session_name') or payload.get('session_id') or '?'}, "
             f"request_id={request_id[:8]}, clients={sent})"
         )
 

@@ -64,6 +64,18 @@ def init_tool_approval_route(ws_handler: WebSocketHandler) -> APIRouter:
         except Exception:
             return JSONResponse({"decision": "deny", "reason": "bad_request"}, status_code=400)
 
+        # 다중 세션: hook 이 실어 보낸 세션 키를 conversation_id + 사용자가 정한
+        # 이름으로 환산해, 팝업이 "어느 방의 요청인지" 보여줄 수 있게 한다.
+        if isinstance(payload, dict):
+            try:
+                session_id, session_name = await ws_handler.resolve_session_label(
+                    str(payload.get("session_key") or "")
+                )
+                payload["session_id"] = session_id
+                payload["session_name"] = session_name
+            except Exception as e:
+                logger.debug(f"[ToolApproval] 세션 라벨 결정 실패: {e}")
+
         result = await ws_handler.tool_approval.request_approval(
             clients=ws_handler.client_connections,
             payload=payload,

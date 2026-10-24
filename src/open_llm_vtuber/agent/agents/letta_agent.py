@@ -1314,6 +1314,35 @@ class LettaAgent(AgentInterface):
             return "", ""
         return _decode_session_meta(getattr(conv, "summary", None))
 
+    async def resolve_session_by_key(self, session_key: str) -> tuple:
+        """세션 파일 키 → (conversation_id, 표시용 세션 이름).
+
+        `claude -p` 의 PreToolUse hook 은 자기가 속한 세션을 파일명 안전 문자로
+        치환된 키(`_sanitize_session_key` 결과)로만 알고 있다. 승인 팝업에
+        "어느 방의 요청인지" 적어주려면 원본 conversation_id 와 사용자가 정한
+        이름이 필요하므로, 알고 있는 세션들을 같은 규칙으로 변환해 역매핑한다.
+        캐시에 이름이 없으면 letta 에서 한 번 조회해 보강한다.
+        """
+        key = _sanitize_session_key(session_key)
+        target = ""
+        for cid in list(self._session_names.keys()):
+            if _sanitize_session_key(cid) == key:
+                target = cid
+                break
+        if not target:
+            # 아직 전환/생성한 적 없는 세션. default 는 키가 그대로 id 다.
+            target = _DEFAULT_SESSION_KEY if key == _DEFAULT_SESSION_KEY else key
+
+        name = (self._session_names.get(target) or "").strip()
+        if not name:
+            fetched, _ = await self._fetch_session_meta(target)
+            name = (fetched or "").strip()
+            if name:
+                self._session_names[target] = name
+        if not name and target == _DEFAULT_SESSION_KEY:
+            name = _DEFAULT_SESSION_NAME
+        return target, name
+
     async def update_session_summary(self, conversation_id: str, summary: str) -> bool:
         """세션 이름 변경. 미즈키가 쓴 한 줄 요약은 그대로 둔다."""
         name = (summary or "").strip()
