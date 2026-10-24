@@ -142,6 +142,19 @@ def abort_flag_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
     return f"/tmp/mizuki_abort_{key}.flag"
 
 
+def reasoning_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
+    """세션별 툴 승인 의도 파일 경로 (letta 측 intent_file 과 동일 규칙).
+
+    단일 파일을 공유하면 두 세션이 동시에 도는 동안 A 세션의 {의도} 가
+    B 세션 승인 팝업에 뜰 수 있다. 읽는 쪽(claude_tool_approval_hook.py)은
+    claude_cli_client.py 가 주입하는 MIZUKI_INTENT_FILE env 로 같은 경로를 받는다.
+    """
+    key = _sanitize_session_key(session_key)
+    if key == _DEFAULT_SESSION_KEY:
+        return _REASONING_FILE
+    return f"/tmp/mizuki_last_reasoning_{key}.json"
+
+
 # ── 다중 세션 동시 처리 (TODO19 3단계) ──────────────────────────────────────
 # LettaAgent 인스턴스는 전체 백엔드에서 하나만 공유된다. 그래서 세션 상태를
 # 인스턴스 필드에 두면 두 세션이 동시에 돌 때 서로의 값을 덮어쓴다.
@@ -445,13 +458,16 @@ def _strip_live2d_tags(text: str) -> str:
     return _LIVE2D_TAG_RE.sub("", text).strip()
 
 
-def _save_reasoning(text: str) -> None:
-    """last_reasoning에서 툴 승인 팝업용 intent를 추출해 파일 저장.
+def _save_reasoning(text: str, session: Optional[str] = None) -> None:
+    """last_reasoning에서 툴 승인 팝업용 intent를 추출해 세션별 파일에 저장.
 
     추출 우선순위:
     1. {의도} 패턴 — 마지막 중괄호 안 텍스트 (툴 승인 팝업 전용 포맷)
     2. [알림: ...] 패턴 — 마지막 알림 (fallback, {} 없을 때만)
     3. 둘 다 없으면 저장 안 함
+
+    session: 호출자(LettaAgent)의 conversation_id. 넘기면 세션 바인딩이 없는
+    호출에서도 UI 활성 세션 기준 경로가 되어 hook 쪽 경로와 어긋나지 않는다.
     """
     if not text:
         return
@@ -470,14 +486,17 @@ def _save_reasoning(text: str) -> None:
 
     if not intent:
         return
+    session = session or _SESSION_CTX.get() or _DEFAULT_SESSION_KEY
     try:
-        with open(_REASONING_FILE, "w", encoding="utf-8") as _rf:
-            # session: 동시에 여러 세션이 돌 때 어느 쪽 의도인지 구분하기 위한 꼬리표
+        # 세션별 파일에 쓴다. hook 은 MIZUKI_INTENT_FILE env 로 같은 경로만 읽으므로
+        # 동시에 두 세션이 돌아도 서로의 의도 문구가 섞이지 않는다.
+        with open(reasoning_file(session), "w", encoding="utf-8") as _rf:
+            # session: 어느 세션에서 쓴 것인지 확인용 꼬리표(디버깅/하위호환)
             json.dump(
                 {
                     "text": intent,
                     "ts": _time.time(),
-                    "session": _SESSION_CTX.get() or "default",
+                    "session": session,
                 },
                 _rf,
                 ensure_ascii=False,
@@ -1683,7 +1702,7 @@ class LettaAgent(AgentInterface):
                             yield {"type": "progress_update", "text": _notify, "timestamp": _time.time()}
                             _found_notifies.add(_notify)
                     # reasoning을 파일에 즉시 저장 — hook이 다음 tool_call 전에 읽어갈 수 있도록
-                    _save_reasoning(last_reasoning)
+                    _save_reasoning(last_reasoning, self.conversation_id)
                     continue
                 elif token.message_type == "assistant_message":
                     content = token.content
@@ -1754,7 +1773,7 @@ class LettaAgent(AgentInterface):
                     #   본문은 응답 텍스트 전체라서 팝업에 표시하면 너무 길고 노이즈가 많음.
                     if not last_reasoning and _notify_texts:
                         last_reasoning = " | ".join(_notify_texts)
-                        _save_reasoning(last_reasoning)
+                        _save_reasoning(last_reasoning, self.conversation_id)
                     if not text:
                         continue
                 elif token.message_type == "letta_error":
@@ -1765,7 +1784,7 @@ class LettaAgent(AgentInterface):
                     tool_name = getattr(_tc, "name", None) or "unknown"
                     tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
                     # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
-                    _save_reasoning(last_reasoning)
+                    _save_reasoning(last_reasoning, self.conversation_id)
                     # 세션 활동 상태를 툴 실행 중으로 업데이트 (프론트 스피너 텍스트 반영)
                     yield {"type": "agent_status", "status": "active", "detail": f"툴 실행 중 · {tool_name}", "timestamp": _time.time()}
                     yield {"type": "tool_call_status", "status": "running", "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time(), "intent": last_reasoning}
