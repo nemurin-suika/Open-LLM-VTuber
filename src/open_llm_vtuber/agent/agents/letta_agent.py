@@ -828,6 +828,66 @@ def _create_new_agent(
     return agent.id
 
 
+# ── 재접속 대화 복원 (TODO19 1단계) ─────────────────────────────────────────
+# 프론트는 접속할 때마다 빈 화면으로 시작한다. 백엔드의 chat_history JSON은
+# 접속마다 새 history_uid가 생겨 조각나 있어 쓸모가 없으므로,
+# 진짜 대화 원본인 letta conversation에서 직접 읽어 복원한다.
+# letta 원문에는 프롬프트 메타 헤더와 Live2D 태그가 섞여 있어 그대로 보여주면
+# 지저분하다 → 아래 정제 함수로 사람이 읽는 부분만 남긴다.
+_HISTORY_META_LINE_RE = re.compile(
+    r"^\[(?:현재 TTS 볼륨|현재 시각|PROACTIVE_USER_INSTRUCTION)[^\]]*\]\s*$",
+    re.MULTILINE,
+)
+_NEMULIN_BLOCK_RE = re.compile(r"\[네무린\](.*?)\[/네무린\]", re.DOTALL)
+_HISTORY_SKIP_PAYLOAD_TYPES = {"system_alert", "heartbeat", "login", "logout"}
+
+
+def _clean_user_history_text(raw: Optional[str]) -> Optional[str]:
+    """letta user_message → 프론트 채팅창에 보여줄 네무린 발화. 숨길 것이면 None."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    # 컴팩션 안내 같은 시스템 JSON 페이로드는 대화가 아니므로 숨긴다.
+    if text.startswith("{"):
+        payload = None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            if payload.get("type") in _HISTORY_SKIP_PAYLOAD_TYPES:
+                return None
+            inner = payload.get("message")
+            if isinstance(inner, str):
+                text = inner.strip()
+
+    # 자발 발화 트리거는 네무린이 친 말이 아니다.
+    if "[PROACTIVE_SPEAK_TRIGGER]" in text:
+        return None
+
+    blocks = [b.strip() for b in _NEMULIN_BLOCK_RE.findall(text) if b.strip()]
+    if blocks:
+        text = "\n".join(blocks)
+    else:
+        text = _HISTORY_META_LINE_RE.sub("", text)
+
+    return text.strip() or None
+
+
+def _clean_assistant_history_text(raw: Optional[str]) -> Optional[str]:
+    """letta assistant_message → 프론트 채팅창 표시용 텍스트."""
+    text = raw or ""
+    text = re.sub(r"\[알림:\s*.*?\]", "", text, flags=re.DOTALL)
+    text = re.sub(r"\[이미지\].*?\[/이미지\]", "", text, flags=re.DOTALL)
+    text = _MIZUKI_IMAGE_TAG_RE.sub("", text)
+    text = _LIVE2D_TAG_RE.sub("", text)
+    text = text.replace("[무음시작]", "").replace("[무음끝]", "")
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or None
+
+
 class LettaAgent(AgentInterface):
     """
     Custom Letta class to interface with the Letta server.
@@ -894,6 +954,97 @@ class LettaAgent(AgentInterface):
                 )
             )
         )
+
+    async def fetch_history_messages(
+        self,
+        limit: int = 50,
+        before: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """letta conversation에서 과거 대화를 읽어 프론트 복원용 목록으로 변환.
+
+        Args:
+            limit: 돌려줄 표시용 메시지 개수 상한
+            before: 이 message id보다 과거만 조회 (위로 스크롤 추가 로드용)
+            conversation_id: 조회 대상 세션. 생략하면 이 에이전트의 현재 세션.
+
+        Returns:
+            {"messages": [{"id", "role", "content", "timestamp"}],
+             "oldest_id": str|None, "has_more": bool}
+        """
+        want = max(1, min(int(limit or 50), 200))
+        # 메타 메시지가 정제 과정에서 걸러지므로 넉넉히 받아온다.
+        fetch_n = min(want * 3, 400)
+        target = conversation_id or self.conversation_id
+
+        kwargs: Dict[str, Any] = {
+            "agent_id": self.id,
+            "limit": fetch_n,
+            "order": "desc",
+            "extra_query": {
+                "include_return_message_types": [
+                    "user_message",
+                    "assistant_message",
+                ]
+            },
+        }
+        if before:
+            kwargs["before"] = before
+
+        try:
+            page = await self.client.conversations.messages.list(target, **kwargs)
+        except Exception as e:
+            logger.error(f"[history] letta 대화 복원 실패 (conv={target}): {e}")
+            return {"messages": [], "oldest_id": None, "has_more": False}
+
+        raw_items = list(getattr(page, "items", None) or [])
+        # 서버가 order와 무관하게 정렬해 돌려주는 사례가 있어 직접 오름차순 정렬.
+        raw_items.sort(key=lambda m: str(getattr(m, "date", "") or ""))
+
+        cleaned: List[Dict[str, Any]] = []
+        for msg in raw_items:
+            mtype = getattr(msg, "message_type", "")
+            content = getattr(msg, "content", None)
+            if not isinstance(content, str):
+                content = "" if content is None else str(content)
+
+            if mtype == "user_message":
+                text = _clean_user_history_text(content)
+                role = "human"
+            elif mtype == "assistant_message":
+                text = _clean_assistant_history_text(content)
+                role = "ai"
+            else:
+                continue
+
+            if not text:
+                continue
+
+            date = getattr(msg, "date", None)
+            cleaned.append(
+                {
+                    "id": str(getattr(msg, "id", "") or ""),
+                    "role": role,
+                    "content": text,
+                    "timestamp": str(date) if date else "",
+                }
+            )
+
+        has_more = len(raw_items) >= fetch_n
+        if len(cleaned) > want:
+            cleaned = cleaned[-want:]
+            has_more = True
+
+        oldest_id = cleaned[0]["id"] if cleaned else None
+        logger.info(
+            f"[history] 복원 {len(cleaned)}건 (conv={target}, raw={len(raw_items)}, "
+            f"before={before}, has_more={has_more})"
+        )
+        return {
+            "messages": cleaned,
+            "oldest_id": oldest_id,
+            "has_more": has_more,
+        }
 
     def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
         # The Letta Server automatically stores historical messages, so this part is not needed

@@ -114,6 +114,7 @@ class WebSocketHandler:
             "request-group-info": self._handle_group_info,
             "fetch-history-list": self._handle_history_list_request,
             "fetch-and-set-history": self._handle_fetch_history,
+            "fetch-letta-history": self._handle_fetch_letta_history,
             "create-new-history": self._handle_create_history,
             "delete-history": self._handle_delete_history,
             "interrupt-signal": self._handle_interrupt,
@@ -1127,6 +1128,65 @@ class WebSocketHandler:
             json.dumps({"type": "history-data", "messages": messages})
         )
 
+    async def _handle_fetch_letta_history(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """재접속 시 letta conversation에서 직접 지난 대화를 읽어 돌려준다 (TODO19 1단계).
+
+        백엔드 chat_history JSON은 접속마다 새 history_uid로 조각나 쓸모가 없어서,
+        대화 원본인 letta를 복원 소스로 쓴다.
+
+        요청 payload:
+            limit  : 가져올 개수 (기본 50)
+            before : 이 message id보다 과거만 (위로 스크롤 추가 로드)
+            conversation_id : 조회할 세션 (생략 시 현재 세션)
+        """
+        context = self.client_contexts.get(client_uid)
+        if context is None:
+            return
+
+        agent = getattr(context, "agent_engine", None)
+        fetcher = getattr(agent, "fetch_history_messages", None)
+        if fetcher is None:
+            # letta 이외 agent에서는 조용히 빈 결과 (프론트가 기존 경로로 폴백)
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "letta-history-data",
+                        "messages": [],
+                        "oldest_id": None,
+                        "has_more": False,
+                        "append": bool(data.get("before")),
+                        "supported": False,
+                    }
+                )
+            )
+            return
+
+        try:
+            result = await fetcher(
+                limit=int(data.get("limit") or 50),
+                before=data.get("before"),
+                conversation_id=data.get("conversation_id"),
+            )
+        except Exception as e:
+            logger.error(f"[history] letta 히스토리 조회 중 오류: {e}")
+            result = {"messages": [], "oldest_id": None, "has_more": False}
+
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "letta-history-data",
+                    "messages": result.get("messages", []),
+                    "oldest_id": result.get("oldest_id"),
+                    "has_more": result.get("has_more", False),
+                    "append": bool(data.get("before")),
+                    "supported": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+
     async def _handle_create_history(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
@@ -1144,6 +1204,9 @@ class WebSocketHandler:
                     {
                         "type": "new-history-created",
                         "history_uid": history_uid,
+                        # 접속 시 자동 생성인지(True) 사용자가 새 세션을 만든 건지(False).
+                        # 프론트는 자동 생성이면 채팅창을 비우지 않는다 (TODO19 1단계).
+                        "initial": bool(data.get("initial")),
                     }
                 )
             )
