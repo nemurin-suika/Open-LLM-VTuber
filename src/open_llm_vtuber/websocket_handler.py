@@ -209,6 +209,8 @@ class WebSocketHandler:
                     "model_info": session_service_context.live2d_model.model_info,
                     "conf_name": session_service_context.character_config.conf_name,
                     "conf_uid": session_service_context.character_config.conf_uid,
+                    "character_name": session_service_context.character_config.character_name,
+                    "human_name": session_service_context.character_config.human_name,
                     "client_uid": client_uid,
                     "wind_effect_config": wind_config,
                     "idle_gaze_config": idle_gaze_config,
@@ -1430,6 +1432,8 @@ class WebSocketHandler:
                     "model_info": context.live2d_model.model_info,
                     "conf_name": context.character_config.conf_name,
                     "conf_uid": context.character_config.conf_uid,
+                    "character_name": context.character_config.character_name,
+                    "human_name": context.character_config.human_name,
                     "client_uid": client_uid,
                 }
             )

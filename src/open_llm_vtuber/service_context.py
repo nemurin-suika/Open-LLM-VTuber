@@ -553,6 +553,8 @@ class ServiceContext:
                             "model_info": self.live2d_model.model_info,
                             "conf_name": self.character_config.conf_name,
                             "conf_uid": self.character_config.conf_uid,
+                            "character_name": self.character_config.character_name,
+                            "human_name": self.character_config.human_name,
                         }
                     )
                 )
