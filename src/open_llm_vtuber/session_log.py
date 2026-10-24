@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -145,7 +146,50 @@ def _read_entries(session_id: Optional[str]) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug(f"[session-log] 읽기 실패 ({path}): {e}")
         return []
-    return out[-_MERGE_MAX_ENTRIES:]
+
+    # 같은 알림이 두 번 적히는 경우가 있다(턴 종료 직후 폴링이 마지막 줄을 다시 집는다).
+    # 시각·역할·내용이 모두 같으면 한 줄로 친다.
+    seen = set()
+    uniq: List[Dict[str, Any]] = []
+    for item in out:
+        key = (
+            str(item.get("ts") or ""),
+            str(item.get("role") or ""),
+            str(item.get("type") or ""),
+            str(item.get("content") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(item)
+    return uniq[-_MERGE_MAX_ENTRIES:]
+
+
+# letta 저장본에는 전처리로 붙은 태그가 섞인다.
+#   예) 트윗 링크 하나를 보내면 og:image 를 찾아 ``[이미지 링크]...[/이미지 링크]`` 가
+#       뒤에 덧붙은 채로 저장된다. 그래서 보조 로그의 원문과 글자가 달라진다.
+# 비교할 때만 태그와 공백을 걷어내고, 화면에 남는 건 원문 그대로 둔다.
+_TAG_RE = re.compile(r"\[/?[^\[\]]{0,40}\]")
+_WS_RE = re.compile(r"\s+")
+# 접두사 매칭을 허용할 최소 길이 (짧은 맞장구가 엉뚱하게 짝지어지지 않도록).
+_PREFIX_MIN_CHARS = 12
+
+
+def _norm_body(text: Any) -> str:
+    """발화 비교용 정규화: 대괄호 태그 제거 + 공백 전부 제거."""
+    body = _TAG_RE.sub(" ", str(text or ""))
+    return _WS_RE.sub("", body)
+
+
+def _same_utterance(log_body: str, letta_body: str) -> bool:
+    """같은 발화인가. letta 쪽이 전처리로 길어졌을 수 있어 접두사까지 허용한다."""
+    a, b = _norm_body(log_body), _norm_body(letta_body)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= _PREFIX_MIN_CHARS and longer.startswith(shorter)
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -221,7 +265,7 @@ def merge_history(
         for cand in pending_user:
             if cand.get("used"):
                 continue
-            if str(cand["entry"].get("content") or "").strip() == body:
+            if _same_utterance(str(cand["entry"].get("content") or ""), body):
                 cand["used"] = True
                 it["drop"] = True
                 break
