@@ -1046,6 +1046,123 @@ class LettaAgent(AgentInterface):
             "has_more": has_more,
         }
 
+    # ------------------------------------------------------------------
+    # 다중 세션(letta conversation) 관리 — TODO19 2단계
+    #   세션 하나 = letta conversation 하나.
+    #   core memory(human/persona)와 archival은 agent 단위라 모든 세션이 공유한다.
+    #   분리되는 것은 "진행 중인 대화 흐름"뿐 (TODO19 필수 제약).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _conv_to_dict(conv: Any) -> Dict[str, Any]:
+        """letta Conversation 객체를 프론트 전송용 dict로."""
+        summary = getattr(conv, "summary", None) or ""
+        return {
+            "id": str(getattr(conv, "id", "") or ""),
+            "summary": summary,
+            "created_at": str(getattr(conv, "created_at", "") or ""),
+            "last_message_at": str(getattr(conv, "last_message_at", "") or ""),
+            "is_default": False,
+        }
+
+    async def list_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """세션 목록. 맨 앞은 항상 기존 단일 대화(default) 가상 세션.
+
+        letta의 conversation 목록 API는 default(conversation_id IS NULL)를
+        돌려주지 않으므로 프론트에서 쓸 수 있게 직접 끼워 넣는다.
+        """
+        sessions: List[Dict[str, Any]] = [
+            {
+                "id": _DEFAULT_SESSION_KEY,
+                "summary": "메인",
+                "created_at": "",
+                "last_message_at": "",
+                "is_default": True,
+            }
+        ]
+        try:
+            page = await self.client.conversations.list(
+                agent_id=self.id,
+                limit=max(1, min(int(limit or 100), 200)),
+            )
+        except Exception as e:
+            logger.error(f"[session] conversation 목록 조회 실패: {e}")
+            return sessions
+
+        # conversations.list 는 response_model=List[Conversation] 이라
+        # 페이지 객체가 아니라 그냥 리스트를 돌려준다 (2026-10-24 실측).
+        items = list(getattr(page, "items", None) or page or [])
+        converted = [self._conv_to_dict(c) for c in items]
+        # 최근 발화 순. last_message_at이 비어 있으면 created_at으로 대체.
+        converted.sort(
+            key=lambda s: s["last_message_at"] or s["created_at"],
+            reverse=True,
+        )
+        sessions.extend(converted)
+        logger.info(f"[session] 목록 {len(sessions)}건 (default 포함)")
+        return sessions
+
+    async def create_session(self, summary: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """새 세션(conversation) 생성. 기억 블록은 agent 공유이므로 isolated 지정 안 함."""
+        try:
+            conv = await self.client.conversations.create(
+                agent_id=self.id,
+                summary=summary or "",
+            )
+        except Exception as e:
+            logger.error(f"[session] conversation 생성 실패: {e}")
+            return None
+        result = self._conv_to_dict(conv)
+        logger.info(f"[session] 생성 완료 id={result['id']}")
+        return result
+
+    async def delete_session(self, conversation_id: str) -> bool:
+        """세션 삭제. default는 삭제 불가."""
+        if not conversation_id or conversation_id == _DEFAULT_SESSION_KEY:
+            logger.warning("[session] default 세션은 삭제할 수 없음")
+            return False
+        try:
+            await self.client.conversations.delete(conversation_id)
+        except Exception as e:
+            logger.error(f"[session] 삭제 실패 (id={conversation_id}): {e}")
+            return False
+        logger.info(f"[session] 삭제 완료 id={conversation_id}")
+        if conversation_id == self.conversation_id:
+            self.set_conversation(_DEFAULT_SESSION_KEY)
+        return True
+
+    async def update_session_summary(self, conversation_id: str, summary: str) -> bool:
+        """세션 제목/요약 변경. letta Conversation에는 name 필드가 없어 summary를 제목으로 쓴다."""
+        if not conversation_id or conversation_id == _DEFAULT_SESSION_KEY:
+            return False
+        try:
+            await self.client.conversations.update(conversation_id, summary=summary or "")
+        except Exception as e:
+            logger.error(f"[session] 요약 수정 실패 (id={conversation_id}): {e}")
+            return False
+        return True
+
+    def set_conversation(self, conversation_id: Optional[str]) -> str:
+        """활성 세션 전환.
+
+        conversation_id에 따라 세션별 IPC 파일 경로(중간 알림/인터럽트 플래그)도 같이 갈아탄다.
+        letta 쪽 claude_cli_client.py가 CONVERSATION_ID 메타데이터로 같은 경로를 계산하므로
+        두 프로세스의 세션 키가 어긋나지 않아야 한다.
+        """
+        target = conversation_id or _DEFAULT_SESSION_KEY
+        if target == self.conversation_id:
+            return target
+        self.conversation_id = target
+        self._session_key = _sanitize_session_key(target)
+        self._notify_file = progress_notify_file(self._session_key)
+        self._abort_file = abort_flag_file(self._session_key)
+        self._abort_flag = False
+        logger.info(
+            f"[session] 활성 세션 전환 → {target} "
+            f"(key={self._session_key}, notify={self._notify_file})"
+        )
+        return target
+
     def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
         # The Letta Server automatically stores historical messages, so this part is not needed
         pass

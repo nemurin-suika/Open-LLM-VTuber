@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Callable, TypedDict
+from typing import Any, Dict, List, Optional, Callable, TypedDict
 from fastapi import WebSocket, WebSocketDisconnect
 import asyncio
 import json
@@ -115,6 +115,12 @@ class WebSocketHandler:
             "fetch-history-list": self._handle_history_list_request,
             "fetch-and-set-history": self._handle_fetch_history,
             "fetch-letta-history": self._handle_fetch_letta_history,
+            # 다중 세션 (TODO19 2단계)
+            "fetch-session-list": self._handle_fetch_session_list,
+            "create-session": self._handle_create_session,
+            "switch-session": self._handle_switch_session,
+            "delete-session": self._handle_delete_session,
+            "rename-session": self._handle_rename_session,
             "create-new-history": self._handle_create_history,
             "delete-history": self._handle_delete_history,
             "interrupt-signal": self._handle_interrupt,
@@ -1129,6 +1135,126 @@ class WebSocketHandler:
         await websocket.send_text(
             json.dumps({"type": "history-data", "messages": messages})
         )
+
+    # ------------------------------------------------------------------
+    # 다중 세션(letta conversation) — TODO19 2단계
+    # ------------------------------------------------------------------
+
+    def _get_letta_agent(self, client_uid: str) -> Optional[Any]:
+        """세션 기능을 지원하는 letta agent 가져오기. 미지원이면 None."""
+        context = self.client_contexts.get(client_uid)
+        if context is None:
+            return None
+        agent = getattr(context, "agent_engine", None)
+        if agent is None or not hasattr(agent, "list_sessions"):
+            return None
+        return agent
+
+    async def _send_session_list(
+        self, websocket: WebSocket, agent: Any, extra: Optional[dict] = None
+    ) -> None:
+        try:
+            sessions = await agent.list_sessions()
+        except Exception as e:
+            logger.error(f"[session] 목록 조회 중 오류: {e}")
+            sessions = []
+        payload = {
+            "type": "session-list",
+            "sessions": sessions,
+            "active_id": getattr(agent, "conversation_id", "default"),
+            "supported": True,
+        }
+        if extra:
+            payload.update(extra)
+        await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+
+    async def _handle_fetch_session_list(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """세션 목록 요청. letta 이외 agent면 supported=False로 조용히 폴백."""
+        agent = self._get_letta_agent(client_uid)
+        if agent is None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "session-list",
+                        "sessions": [],
+                        "active_id": "default",
+                        "supported": False,
+                    }
+                )
+            )
+            return
+        await self._send_session_list(websocket, agent)
+
+    async def _handle_create_session(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """새 세션 생성 후 곧바로 그 세션으로 전환하고 목록을 갱신해 보낸다."""
+        agent = self._get_letta_agent(client_uid)
+        if agent is None:
+            return
+        created = await agent.create_session(summary=data.get("summary") or "")
+        if created is None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "session-error",
+                        "action": "create",
+                        "message": "세션 생성에 실패했어.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        agent.set_conversation(created["id"])
+        await self._send_session_list(
+            websocket, agent, extra={"created_id": created["id"]}
+        )
+
+    async def _handle_switch_session(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """활성 세션 전환. 대화 복원은 프론트가 fetch-letta-history로 따로 요청한다."""
+        agent = self._get_letta_agent(client_uid)
+        if agent is None:
+            return
+        target = data.get("conversation_id") or "default"
+        active = agent.set_conversation(target)
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "session-switched",
+                    "active_id": active,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    async def _handle_delete_session(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        agent = self._get_letta_agent(client_uid)
+        if agent is None:
+            return
+        target = data.get("conversation_id") or ""
+        success = await agent.delete_session(target)
+        await self._send_session_list(
+            websocket,
+            agent,
+            extra={"deleted_id": target if success else None},
+        )
+
+    async def _handle_rename_session(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        agent = self._get_letta_agent(client_uid)
+        if agent is None:
+            return
+        target = data.get("conversation_id") or ""
+        summary = data.get("summary") or ""
+        await agent.update_session_summary(target, summary)
+        await self._send_session_list(websocket, agent)
 
     async def _handle_fetch_letta_history(
         self, websocket: WebSocket, client_uid: str, data: dict
