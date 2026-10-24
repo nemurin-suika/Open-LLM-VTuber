@@ -190,8 +190,18 @@ class WebSocketHandler:
         )
 
     async def _notify_session_activity(self, session_id: str) -> None:
-        """레일에 미확인 점을 찍어달라고 프론트에 알린다."""
-        payload = json.dumps({"type": "session-activity", "session_id": session_id})
+        """레일에 미확인 표시를 띄워달라고 프론트에 알린다.
+
+        count = 그 세션에 쌓인 미즈키 발화 덩어리(턴) 개수. 중간 알림은 세지 않는다
+        (네무린 선택, 2026-10-25). 프론트는 이 숫자를 레일 배지로 띄운다.
+        """
+        payload = json.dumps(
+            {
+                "type": "session-activity",
+                "session_id": session_id,
+                "count": len(self._session_buffers.get(session_id, [])),
+            }
+        )
         for ws in list(self.client_connections.values()):
             try:
                 await ws.send_text(payload)
@@ -1334,6 +1344,10 @@ class WebSocketHandler:
             # 다중 세션 동시 처리: 지금 돌고 있는 세션과 읽지 않은 발화가 쌓인 세션
             "running_ids": [sid for sid, t in self._capture_tasks.items() if not t.done()],
             "unread_ids": [sid for sid, turns in self._session_buffers.items() if turns],
+            # 세션별 미확인 발화 덩어리 개수 (새로고침 후에도 배지 숫자가 유지된다)
+            "unread_counts": {
+                sid: len(turns) for sid, turns in self._session_buffers.items() if turns
+            },
         }
         if extra:
             payload.update(extra)
