@@ -139,6 +139,67 @@ def abort_flag_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
     if key == _DEFAULT_SESSION_KEY:
         return _ABORT_FLAG_FILE
     return f"/tmp/mizuki_abort_{key}.flag"
+
+
+# ── 세션 메타: 사용자가 정한 이름 + 미즈키가 쓰는 최근 대화 한 줄 요약 ──
+# letta Conversation 스키마에는 name 필드가 없고 summary 하나뿐이라
+# summary 안에 JSON {"n": 이름, "g": 한 줄 요약} 두 값을 같이 넣는다.
+# 과거에 평문으로 저장된 summary 는 이름으로 간주한다(하위호환).
+# letta 서버는 summary 를 create/fork 때만 쓰고 자동으로 덮어쓰지 않는다(2026-10-24 실측).
+_DEFAULT_SESSION_NAME = "메인"
+_DEFAULT_META_FILE = os.path.expanduser("~/.mizuki/session_default_meta.json")
+
+
+def _encode_session_meta(name: str, gist: str) -> str:
+    return json.dumps(
+        {"n": (name or "").strip(), "g": (gist or "").strip()}, ensure_ascii=False
+    )
+
+
+def _decode_session_meta(summary: Optional[str]) -> tuple:
+    """summary 문자열 → (이름, 요약)."""
+    raw = (summary or "").strip()
+    if not raw:
+        return "", ""
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return (
+                    str(data.get("n") or "").strip(),
+                    str(data.get("g") or "").strip(),
+                )
+        except Exception:
+            pass
+    return raw, ""
+
+
+def _load_default_meta() -> tuple:
+    """default(메인) 세션은 letta 에 row 가 없어 메타를 로컬 파일에 보관한다."""
+    try:
+        with open(_DEFAULT_META_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return (
+            str(data.get("n") or _DEFAULT_SESSION_NAME),
+            str(data.get("g") or ""),
+        )
+    except Exception:
+        return _DEFAULT_SESSION_NAME, ""
+
+
+def _save_default_meta(name: str, gist: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(_DEFAULT_META_FILE), exist_ok=True)
+        with open(_DEFAULT_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {"n": name or _DEFAULT_SESSION_NAME, "g": gist or ""},
+                f,
+                ensure_ascii=False,
+            )
+    except Exception as e:
+        logger.debug(f"[session] default 메타 저장 실패: {e}")
+
+
 # ADB 스크린샷 감시: /tmp/*.png 전체 감시 → 변경/신규 파일 자동 전송
 _ADB_SCREENSHOT_DIR = "/tmp"
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
@@ -156,6 +217,10 @@ _MIZUKI_IMAGE_TAG_RE = re.compile(
     r'|<image_display\s+path\s*=\s*["\']?([^"\'>]+?)["\']?\s*/?>',
     re.DOTALL,
 )
+# 미즈키가 턴 끝에 남기는 현재 세션 한 줄 요약 태그
+#   [세션요약]지금 세션에서 무슨 얘기를 하고 있는지 한 문장[/세션요약]
+# 백엔드가 감지하면 활성 세션의 요약으로 저장하고 TTS/표시 텍스트에서는 제거한다.
+_SESSION_GIST_TAG_RE = re.compile(r'\[세션요약\](.+?)\[/세션요약\]', re.DOTALL)
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -881,6 +946,7 @@ def _clean_assistant_history_text(raw: Optional[str]) -> Optional[str]:
     text = re.sub(r"\[알림:\s*.*?\]", "", text, flags=re.DOTALL)
     text = re.sub(r"\[이미지\].*?\[/이미지\]", "", text, flags=re.DOTALL)
     text = _MIZUKI_IMAGE_TAG_RE.sub("", text)
+    text = _SESSION_GIST_TAG_RE.sub("", text)
     text = _LIVE2D_TAG_RE.sub("", text)
     text = text.replace("[무음시작]", "").replace("[무음끝]", "")
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -932,6 +998,12 @@ class LettaAgent(AgentInterface):
         self._session_key: str = _sanitize_session_key(self.conversation_id)
         self._notify_file: str = progress_notify_file(self._session_key)
         self._abort_file: str = abort_flag_file(self._session_key)
+        # 현재 세션 이름(사용자 지정). 발화 앞에 [세션] 태그로 붙여 미즈키에게 알린다.
+        self._session_name: str = (
+            _DEFAULT_SESSION_NAME
+            if self.conversation_id == _DEFAULT_SESSION_KEY
+            else ""
+        )
         # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
         self._abort_flag: bool = False
         # ADB 스크린샷 실시간 전송용 WebSocket send 함수 (single_conversation.py에서 주입)
@@ -1057,9 +1129,13 @@ class LettaAgent(AgentInterface):
     def _conv_to_dict(conv: Any) -> Dict[str, Any]:
         """letta Conversation 객체를 프론트 전송용 dict로."""
         summary = getattr(conv, "summary", None) or ""
+        name, gist = _decode_session_meta(summary)
         return {
             "id": str(getattr(conv, "id", "") or ""),
-            "summary": summary,
+            # summary 는 하위호환용(이름). 프론트는 name/gist 를 쓴다.
+            "summary": name,
+            "name": name,
+            "gist": gist,
             "created_at": str(getattr(conv, "created_at", "") or ""),
             "last_message_at": str(getattr(conv, "last_message_at", "") or ""),
             "is_default": False,
@@ -1071,10 +1147,13 @@ class LettaAgent(AgentInterface):
         letta의 conversation 목록 API는 default(conversation_id IS NULL)를
         돌려주지 않으므로 프론트에서 쓸 수 있게 직접 끼워 넣는다.
         """
+        _dname, _dgist = _load_default_meta()
         sessions: List[Dict[str, Any]] = [
             {
                 "id": _DEFAULT_SESSION_KEY,
-                "summary": "메인",
+                "summary": _dname,
+                "name": _dname,
+                "gist": _dgist,
                 "created_at": "",
                 "last_message_at": "",
                 "is_default": True,
@@ -1103,11 +1182,15 @@ class LettaAgent(AgentInterface):
         return sessions
 
     async def create_session(self, summary: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """새 세션(conversation) 생성. 기억 블록은 agent 공유이므로 isolated 지정 안 함."""
+        """새 세션(conversation) 생성. 기억 블록은 agent 공유이므로 isolated 지정 안 함.
+
+        summary 인자는 '사용자가 정한 세션 이름'이다. 한 줄 요약은 대화가 시작된 뒤
+        미즈키가 [세션요약] 태그로 채운다.
+        """
         try:
             conv = await self.client.conversations.create(
                 agent_id=self.id,
-                summary=summary or "",
+                summary=_encode_session_meta(summary or "", ""),
             )
         except Exception as e:
             logger.error(f"[session] conversation 생성 실패: {e}")
@@ -1131,18 +1214,64 @@ class LettaAgent(AgentInterface):
             self.set_conversation(_DEFAULT_SESSION_KEY)
         return True
 
-    async def update_session_summary(self, conversation_id: str, summary: str) -> bool:
-        """세션 제목/요약 변경. letta Conversation에는 name 필드가 없어 summary를 제목으로 쓴다."""
-        if not conversation_id or conversation_id == _DEFAULT_SESSION_KEY:
-            return False
+    async def _fetch_session_meta(self, conversation_id: str) -> tuple:
+        """conversation 하나의 (이름, 요약) 조회. 실패하면 ("", "")."""
+        if conversation_id == _DEFAULT_SESSION_KEY:
+            return _load_default_meta()
         try:
-            await self.client.conversations.update(conversation_id, summary=summary or "")
+            conv = await self.client.conversations.retrieve(conversation_id)
         except Exception as e:
-            logger.error(f"[session] 요약 수정 실패 (id={conversation_id}): {e}")
+            logger.debug(f"[session] 메타 조회 실패 (id={conversation_id}): {e}")
+            return "", ""
+        return _decode_session_meta(getattr(conv, "summary", None))
+
+    async def update_session_summary(self, conversation_id: str, summary: str) -> bool:
+        """세션 이름 변경. 미즈키가 쓴 한 줄 요약은 그대로 둔다."""
+        name = (summary or "").strip()
+        if not conversation_id:
             return False
+        if conversation_id == _DEFAULT_SESSION_KEY:
+            _, gist = _load_default_meta()
+            _save_default_meta(name or _DEFAULT_SESSION_NAME, gist)
+            if self.conversation_id == _DEFAULT_SESSION_KEY:
+                self._session_name = name or _DEFAULT_SESSION_NAME
+            return True
+        _, gist = await self._fetch_session_meta(conversation_id)
+        try:
+            await self.client.conversations.update(
+                conversation_id, summary=_encode_session_meta(name, gist)
+            )
+        except Exception as e:
+            logger.error(f"[session] 이름 수정 실패 (id={conversation_id}): {e}")
+            return False
+        if conversation_id == self.conversation_id:
+            self._session_name = name
         return True
 
-    def set_conversation(self, conversation_id: Optional[str]) -> str:
+    async def update_session_gist(self, conversation_id: str, gist: str) -> bool:
+        """미즈키가 남긴 한 줄 요약 저장. 사용자가 정한 이름은 건드리지 않는다."""
+        text = (gist or "").strip()
+        if not conversation_id or not text:
+            return False
+        if conversation_id == _DEFAULT_SESSION_KEY:
+            name, _ = _load_default_meta()
+            _save_default_meta(name, text)
+            logger.info(f"[session] 요약 갱신 (default): {text}")
+            return True
+        name, _ = await self._fetch_session_meta(conversation_id)
+        try:
+            await self.client.conversations.update(
+                conversation_id, summary=_encode_session_meta(name, text)
+            )
+        except Exception as e:
+            logger.error(f"[session] 요약 갱신 실패 (id={conversation_id}): {e}")
+            return False
+        logger.info(f"[session] 요약 갱신 (id={conversation_id}): {text}")
+        return True
+
+    def set_conversation(
+        self, conversation_id: Optional[str], name: Optional[str] = None
+    ) -> str:
         """활성 세션 전환.
 
         conversation_id에 따라 세션별 IPC 파일 경로(중간 알림/인터럽트 플래그)도 같이 갈아탄다.
@@ -1150,9 +1279,16 @@ class LettaAgent(AgentInterface):
         두 프로세스의 세션 키가 어긋나지 않아야 한다.
         """
         target = conversation_id or _DEFAULT_SESSION_KEY
+        if name is not None:
+            self._session_name = (name or "").strip()
         if target == self.conversation_id:
             return target
         self.conversation_id = target
+        if name is None:
+            # 이름을 못 받았으면 다음 발화 때 다시 채우도록 비워둔다.
+            self._session_name = (
+                _DEFAULT_SESSION_NAME if target == _DEFAULT_SESSION_KEY else ""
+            )
         self._session_key = _sanitize_session_key(target)
         self._notify_file = progress_notify_file(self._session_key)
         self._abort_file = abort_flag_file(self._session_key)
@@ -1240,9 +1376,16 @@ class LettaAgent(AgentInterface):
                 mime = getattr(img, "media_type", None) or getattr(img, "mime_type", None) or "image/jpeg"
                 yield {"type": "image_display", "image_base64": img_data, "mime_type": mime, "label": source}
             text = "\n".join(screenshot_tags) + "\n" + text
-            input_content = text
-        else:
-            input_content = text
+
+        # 현재 세션 이름을 발화 맨 앞에 붙여서, 미즈키가 지금 어느 세션에 있는지 알게 한다.
+        # 네무린은 id가 아니라 이름으로 세션을 구분하므로 다른 세션 얘기를 할 때 필요하다.
+        _sname = (self._session_name or "").strip()
+        if not _sname:
+            _sname, _ = await self._fetch_session_meta(self.conversation_id)
+            self._session_name = _sname
+        if _sname:
+            text = f"[세션] {_sname} [/세션]\n" + text
+        input_content = text
 
         # agents.messages.create는 letta에서 deprecated → conversations 엔드포인트 사용.
         # conversation_id="default" + agent_id는 letta의 agent-direct 모드로,
@@ -1260,6 +1403,8 @@ class LettaAgent(AgentInterface):
         _yielded = 0
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
+        _session_gist = ""        # [세션요약] 태그로 받은 현재 세션 한 줄 요약 (마지막 것 사용)
+        _gist_open = False        # [세션요약] 가 열린 채 토큰 경계를 넘어갔는지
         _found_notifies: set = set()  # 이미 yield한 [알림:] 내용 — 중복 방지
         _found_images: set = set()    # 이미 yield한 [이미지] 파일 경로 — 중복 방지
 
@@ -1457,9 +1602,28 @@ class LettaAgent(AgentInterface):
                                     yield _img_payload
                             else:
                                 yield _img_payload
+                    # [세션요약]...[/세션요약] 감지 → 현재 세션 한 줄 요약으로 보관(마지막 것 채택)
+                    for _gm in _SESSION_GIST_TAG_RE.finditer(_assistant_buffer):
+                        _g = _gm.group(1).strip()
+                        if _g:
+                            _session_gist = _g
                     # [알림: ...] 및 [이미지]path[/이미지] 태그를 TTS/표시 텍스트에서 제거
                     text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL)
-                    text = _MIZUKI_IMAGE_TAG_RE.sub('', text).strip()
+                    text = _MIZUKI_IMAGE_TAG_RE.sub('', text)
+                    # 세션요약 태그는 토큰 경계를 넘어가도 통째로 음성/표시에서 빠지게 상태로 처리
+                    if _gist_open:
+                        _close = text.find('[/세션요약]')
+                        if _close == -1:
+                            text = ''
+                        else:
+                            text = text[_close + len('[/세션요약]'):]
+                            _gist_open = False
+                    text = _SESSION_GIST_TAG_RE.sub('', text)
+                    _open_at = text.rfind('[세션요약]')
+                    if _open_at != -1 and '[/세션요약]' not in text[_open_at:]:
+                        text = text[:_open_at]
+                        _gist_open = True
+                    text = text.strip()
                     # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
                     # 우선순위: reasoning_message > [알림:...] 내용
                     # ※ assistant_message 본문 전체를 intent로 쓰지 않음:
@@ -1509,6 +1673,19 @@ class LettaAgent(AgentInterface):
             while not _image_queue.empty():
                 _pi = _image_queue.get_nowait()
                 yield {"type": "image_display", "image_base64": _pi["image_base64"], "mime_type": "image/png", "label": _pi["label"]}
+
+            # 미즈키가 남긴 세션 한 줄 요약 저장 (호버 툴팁에 쓰임)
+            if _session_gist:
+                try:
+                    await self.update_session_gist(self.conversation_id, _session_gist)
+                    if self._websocket_send_fn is not None:
+                        await self._websocket_send_fn(json.dumps({
+                            "type": "session-gist-updated",
+                            "session_id": self.conversation_id,
+                            "gist": _session_gist,
+                        }))
+                except Exception as _ge:
+                    logger.debug(f"[session] 요약 저장 중 오류: {_ge}")
         finally:
             _polling_stop.set()
             _poll_task.cancel()

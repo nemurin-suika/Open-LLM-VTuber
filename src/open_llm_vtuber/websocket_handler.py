@@ -1207,7 +1207,7 @@ class WebSocketHandler:
                 )
             )
             return
-        agent.set_conversation(created["id"])
+        agent.set_conversation(created["id"], name=created.get("name") or "")
         await self._send_session_list(
             websocket, agent, extra={"created_id": created["id"]}
         )
@@ -1220,7 +1220,8 @@ class WebSocketHandler:
         if agent is None:
             return
         target = data.get("conversation_id") or "default"
-        active = agent.set_conversation(target)
+        # 프론트가 세션 이름을 같이 보내면 바로 반영(없으면 agent가 letta에서 조회).
+        active = agent.set_conversation(target, name=data.get("name"))
         await websocket.send_text(
             json.dumps(
                 {
