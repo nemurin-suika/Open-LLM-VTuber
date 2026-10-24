@@ -100,11 +100,108 @@ class WebSocketHandler:
         # Claude 도구 사용 승인 중계기 (hook → /tool-approval → 프론트 → 여기서 resolve)
         self.tool_approval = ToolApprovalManager()
 
-        # 현재 실행 중인 LLM+TTS capture task 참조 (인터럽트 시 cancel 대상)
-        self._current_capture_task: Optional[asyncio.Task] = None
+        # ── 다중 세션 동시 처리 (TODO19 3단계) ────────────────────────────
+        # 세션별로 돌고 있는 LLM+TTS capture task (인터럽트 시 cancel 대상).
+        # 세션 하나가 작업 중일 때 다른 세션에서 말을 걸어도 서로 안 끊긴다.
+        self._capture_tasks: Dict[str, asyncio.Task] = {}
+        # 비활성 세션에서 완성된 발화를 모아두는 버퍼. 값은 턴 단위 메시지 묶음 목록.
+        # 사용자가 그 세션으로 넘어가면 꺼내서 재생한다(마지막 턴만 음성).
+        self._session_buffers: Dict[str, List[List[str]]] = {}
+        # 비활성 세션 버퍼를 재생 큐로 되돌리기 위한 참조 (파이프라인 기동 시 주입)
+        self._regular_pq: Optional[asyncio.Queue] = None
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
+
+    # ── 다중 세션 헬퍼 ────────────────────────────────────────────────────
+
+    def _active_session_id(self) -> str:
+        """사용자가 지금 보고 있는 세션 id."""
+        for ctx in self.client_contexts.values():
+            agent = getattr(ctx, "agent_engine", None)
+            active = getattr(agent, "active_conversation_id", None)
+            if active:
+                return str(active)
+        agent = getattr(self.default_context_cache, "agent_engine", None)
+        return str(getattr(agent, "active_conversation_id", "default") or "default")
+
+    @staticmethod
+    def _mark_replay_only(messages: List[str]) -> List[str]:
+        """자막을 채팅 기록에 또 쌓지 않도록 표시한 메시지 목록.
+
+        비활성 세션 발화는 letta 에 이미 저장되어 있어서, 세션으로 넘어오면
+        fetch-letta-history 복원으로 글이 먼저 채워진다. 그 뒤에 음성을 재생할 때
+        같은 문장을 다시 채팅에 추가하면 중복되므로, 프론트가 기록 추가를
+        건너뛰고 소리와 입모양만 처리하게 플래그를 달아준다.
+        """
+        out: List[str] = []
+        for raw in messages:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                out.append(raw)
+                continue
+            if data.get("type") == "audio":
+                data["replay_only"] = True
+                out.append(json.dumps(data))
+                continue
+            out.append(raw)
+        return out
+
+    def _buffer_session_turn(self, session_id: str, messages: List[str]) -> None:
+        """비활성 세션의 완성된 턴을 보류 버퍼에 쌓는다."""
+        if not messages:
+            return
+        self._session_buffers.setdefault(session_id, []).append(list(messages))
+        logger.info(
+            f"[session] 비활성 세션 발화 보류 (session={session_id}, "
+            f"대기 {len(self._session_buffers[session_id])}턴)"
+        )
+
+    async def _notify_session_activity(self, session_id: str) -> None:
+        """레일에 미확인 점을 찍어달라고 프론트에 알린다."""
+        payload = json.dumps({"type": "session-activity", "session_id": session_id})
+        for ws in list(self.client_connections.values()):
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                pass
+
+    async def _flush_session_buffer(self, session_id: str) -> None:
+        """세션으로 넘어왔을 때 보류분을 재생 큐에 되돌린다.
+
+        소리 정책(네무린 확정): 마지막 한 덩어리만 음성으로 재생하고
+        그 앞의 턴들은 자막만 표시한다.
+        """
+        turns = self._session_buffers.pop(session_id, None)
+        if not turns:
+            return
+        # 앞의 턴들은 글(history 복원)로 이미 보이므로 버리고, 마지막 한 덩어리만 음성 재생.
+        last = self._mark_replay_only(turns[-1])
+        logger.info(
+            f"[session] 보류 발화 재생 (session={session_id}, "
+            f"{len(turns)}턴 중 마지막 턴만 음성)"
+        )
+        ready = asyncio.Event()
+        ready.set()
+        pq = self._regular_pq
+        if pq is not None:
+            await pq.put((last, ready, session_id))
+        else:
+            await self._replay_to_client(last)
+
+    async def _replay_to_client(self, messages: List[str]) -> None:
+        """파이프라인이 없을 때 쓰는 단순 전송 (순서 지연 없음)."""
+        if not self.client_connections:
+            return
+        ws = self.client_connections.get(next(reversed(self.client_connections)))
+        if not ws:
+            return
+        for raw in messages:
+            try:
+                await ws.send_text(raw)
+            except Exception:
+                break
 
     def _init_message_handlers(self) -> Dict[str, Callable]:
         """Initialize message type to handler mapping"""
@@ -121,6 +218,8 @@ class WebSocketHandler:
             "switch-session": self._handle_switch_session,
             "delete-session": self._handle_delete_session,
             "rename-session": self._handle_rename_session,
+            # 다중 세션 동시 처리 (TODO19 3단계)
+            "replay-session-buffer": self._handle_replay_session_buffer,
             "create-new-history": self._handle_create_history,
             "delete-history": self._handle_delete_history,
             "interrupt-signal": self._handle_interrupt,
@@ -447,16 +546,32 @@ class WebSocketHandler:
             "채팅 속도 왜 이래! 좀만 살살, 내 처리 속도에도 한계가 있다고!",
         ]
 
-        # Ordered playback queues: each slot is (messages: list, ready: Event)
+        # Ordered playback queues:
+        # each slot is (messages: list, ready: Event, session_id: str|None)
         regular_pq: asyncio.Queue = asyncio.Queue()
         priority_pq: asyncio.Queue = asyncio.Queue()
+        # 비활성 세션 버퍼를 되돌릴 때 쓰도록 핸들러에 노출
+        self._regular_pq = regular_pq
 
         # ── helpers ──────────────────────────────────────────────────────────
 
-        async def _capture(item: dict, messages: list, ready: asyncio.Event) -> None:
-            """Run LLM+TTS in capture mode; fill messages, then set ready."""
-            # 현재 task를 추적 — 인터럽트 시 cancel 대상
-            self._current_capture_task = asyncio.current_task()
+        async def _capture(
+            item: dict,
+            messages: list,
+            ready: asyncio.Event,
+            session_id: Optional[str] = None,
+        ) -> None:
+            """Run LLM+TTS in capture mode; fill messages, then set ready.
+
+            session_id 를 이 task 의 ContextVar 에 고정해서, 다른 세션이 동시에
+            돌아도 대화 저장 위치와 IPC 파일 경로가 중간에 갈아타지 않게 한다.
+            """
+            from .agent.agents.letta_agent import bind_session, progress_notify_file
+
+            sid = str(session_id or self._active_session_id() or "default")
+            bind_session(sid)
+            # 세션별 task 추적 — 인터럽트 시 cancel 대상
+            self._capture_tasks[sid] = asyncio.current_task()
             user_input_preview = str(item.get("user_input", ""))[:40]
             logger.debug(f"[TTS-DBG] capture start: {user_input_preview!r}")
             try:
@@ -471,6 +586,7 @@ class WebSocketHandler:
                 user_input = item.get("user_input", "")
                 images = item.get("images")
                 base_meta = dict(item.get("metadata") or {})
+                base_meta.pop("session_id", None)
                 base_meta["skip_playback_wait"] = True
 
                 captured: list[str] = []
@@ -479,12 +595,8 @@ class WebSocketHandler:
                 # [알림: ...] 중간 진행 알림을 캡처 버퍼 우회해 실시간 전송
                 import os as _os_notify
                 # 다중 세션: 알림 파일은 letta conversation 단위로 분리되어 있다.
-                # 이 클라이언트가 쓰는 agent의 경로를 그대로 따라간다(없으면 단일 세션 기본 경로).
-                _NOTIFY_FILE = getattr(
-                    getattr(context, "agent_engine", None),
-                    "_notify_file",
-                    "/tmp/mizuki_progress_notify.jsonl",
-                )
+                # 이 capture 가 담당한 세션 경로를 직접 계산한다(활성 세션이 바뀌어도 불변).
+                _NOTIFY_FILE = progress_notify_file(sid)
 
                 async def _poll_and_send_notify() -> None:
                     while True:
@@ -504,6 +616,7 @@ class WebSocketHandler:
                                                     "type": "progress_update",
                                                     "text": _entry.get("text", ""),
                                                     "timestamp": _ts,
+                                                    "session_id": sid,
                                                 }))
                                         except Exception:
                                             pass
@@ -569,8 +682,8 @@ class WebSocketHandler:
                 logger.error(f"Live capture error: {e}")
             finally:
                 # task 추적 해제 (이 task가 현재 추적 중인 것과 같을 때만)
-                if self._current_capture_task is asyncio.current_task():
-                    self._current_capture_task = None
+                if self._capture_tasks.get(sid) is asyncio.current_task():
+                    self._capture_tasks.pop(sid, None)
                 ready.set()
 
         async def _capture_direct_tts(text: str, messages: list, ready: asyncio.Event) -> None:
@@ -648,7 +761,9 @@ class WebSocketHandler:
             except Exception as e:
                 logger.debug(f"[Overload] Letta 알림 실패 (무시): {e}")
 
-        async def _replay(messages: list, idx: int = 0) -> None:
+        async def _replay(
+            messages: list, idx: int = 0, session_id: Optional[str] = None
+        ) -> None:
             """Send captured messages with progressive audio delivery.
 
             In normal (non-capture) mode audio chunks arrive one at a time as TTS
@@ -658,6 +773,12 @@ class WebSocketHandler:
             frontend receives chunks at the same pace as normal mode.
             """
             if not messages or not self.client_connections:
+                return
+            # 비활성 세션의 발화는 지금 보여주지 않고 모아둔다.
+            # 사용자가 그 세션으로 넘어올 때 꺼내서 재생한다(마지막 턴만 음성).
+            if session_id and session_id != self._active_session_id():
+                self._buffer_session_turn(session_id, list(messages))
+                await self._notify_session_activity(session_id)
                 return
             client_uid = next(reversed(self.client_connections))
             ws = self.client_connections.get(client_uid)
@@ -705,39 +826,6 @@ class WebSocketHandler:
                 elif audio_chunk_count == 0:
                     logger.info(f"[TTS-DBG #{idx}]   no real audio — skipping wait")
 
-        async def _next_slot(prio: asyncio.Queue, regular: asyncio.Queue):
-            """Return next (messages, ready) slot, always preferring prio."""
-            # Non-blocking check first
-            try:
-                return prio.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-
-            prio_task = asyncio.create_task(prio.get())
-            reg_task = asyncio.create_task(regular.get())
-            done, pending = await asyncio.wait(
-                {prio_task, reg_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in list(pending):
-                t.cancel()
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            if prio_task in done:
-                if reg_task in done:
-                    regular.put_nowait(reg_task.result())
-                return prio_task.result()
-
-            # Regular won — check priority one more time before accepting it
-            try:
-                slot = prio.get_nowait()
-                regular.put_nowait(reg_task.result())
-                return slot
-            except asyncio.QueueEmpty:
-                return reg_task.result()
-
         # ── player ───────────────────────────────────────────────────────────
 
         _play_idx = 0  # monotonic counter to correlate log lines per output
@@ -747,33 +835,33 @@ class WebSocketHandler:
             import time
             nonlocal _play_idx
             SLOT_TIMEOUT = 7200.0  # 슬롯당 최대 대기 시간 (초) — 2시간
-            # pending: (messages, ready_event, enqueued_at)
-            pending: list[tuple[list, asyncio.Event, float]] = []
+            # pending: (messages, ready_event, session_id, enqueued_at)
+            pending: list[tuple[list, asyncio.Event, Optional[str], float]] = []
 
             def _drain_queues() -> None:
                 """큐에서 즉시 꺼낼 수 있는 슬롯을 모두 pending에 추가."""
                 while True:
                     try:
-                        msgs, rdy = priority_pq.get_nowait()
-                        pending.insert(0, (msgs, rdy, time.monotonic()))
+                        msgs, rdy, sid = priority_pq.get_nowait()
+                        pending.insert(0, (msgs, rdy, sid, time.monotonic()))
                     except asyncio.QueueEmpty:
                         break
                 while True:
                     try:
-                        msgs, rdy = regular_pq.get_nowait()
-                        pending.append((msgs, rdy, time.monotonic()))
+                        msgs, rdy, sid = regular_pq.get_nowait()
+                        pending.append((msgs, rdy, sid, time.monotonic()))
                     except asyncio.QueueEmpty:
                         break
 
             def _purge_timed_out() -> None:
-                """300초가 지난 슬롯을 버린다."""
+                """타임아웃이 지난 슬롯을 버린다."""
                 now = time.monotonic()
                 for i in reversed(range(len(pending))):
-                    _, _, enqueued_at = pending[i]
+                    _, _, slot_sid, enqueued_at = pending[i]
                     if now - enqueued_at > SLOT_TIMEOUT:
                         pending.pop(i)
                         logger.warning("[TTS-DBG] ⏰ slot timed out (LLM/TTS >7200s) — skipping")
-                        # slot timeout 시 claude -p 프로세스도 종료
+                        # slot timeout 시 그 세션의 claude -p 프로세스만 종료
                         try:
                             if self.client_connections:
                                 _uid = next(reversed(self.client_connections))
@@ -781,8 +869,16 @@ class WebSocketHandler:
                                 if _ctx and hasattr(_ctx, "agent_engine"):
                                     _agent = _ctx.agent_engine
                                     if hasattr(_agent, "handle_interrupt"):
-                                        _agent.handle_interrupt("")
-                                        logger.info("[TTS-DBG] slot timeout → handle_interrupt() 호출")
+                                        try:
+                                            _agent.handle_interrupt(
+                                                "", conversation_id=slot_sid
+                                            )
+                                        except TypeError:
+                                            _agent.handle_interrupt("")
+                                        logger.info(
+                                            "[TTS-DBG] slot timeout → "
+                                            f"handle_interrupt(session={slot_sid}) 호출"
+                                        )
                         except Exception as _e:
                             logger.warning(f"[TTS-DBG] slot timeout handle_interrupt 실패 (무시): {_e}")
 
@@ -805,19 +901,20 @@ class WebSocketHandler:
                             pass
                     now = time.monotonic()
                     if get_prio in done:
-                        msgs, rdy = get_prio.result()
-                        pending.insert(0, (msgs, rdy, now))
+                        msgs, rdy, sid = get_prio.result()
+                        pending.insert(0, (msgs, rdy, sid, now))
                         if get_reg in done:
-                            msgs, rdy = get_reg.result()
-                            pending.append((msgs, rdy, now))
+                            msgs, rdy, sid = get_reg.result()
+                            pending.append((msgs, rdy, sid, now))
                     else:
-                        msgs, rdy = get_reg.result()
-                        pending.append((msgs, rdy, now))
+                        msgs, rdy, sid = get_reg.result()
+                        pending.append((msgs, rdy, sid, now))
                     continue
 
                 # ── 이미 완성된 슬롯이 있는지 즉시 확인 ─────────────────────────
                 ready_idx = next(
-                    (i for i, (_, rdy, _t) in enumerate(pending) if rdy.is_set()), None
+                    (i for i, (_, rdy, _s, _t) in enumerate(pending) if rdy.is_set()),
+                    None,
                 )
 
                 if ready_idx is None:
@@ -825,10 +922,15 @@ class WebSocketHandler:
                     now = time.monotonic()
                     wait_timeout = max(
                         0.1,
-                        SLOT_TIMEOUT - max(now - t for _, _, t in pending)
+                        SLOT_TIMEOUT - max(now - t for _, _, _s, t in pending)
                     )
 
-                    ready_waits = [asyncio.create_task(rdy.wait()) for _, rdy, _ in pending]
+                    # pending 은 대기 중에도 새 슬롯이 끼어들 수 있으므로
+                    # 이 시점의 순서를 그대로 떠서 wait task 와 짝을 맞춘다.
+                    snapshot = list(pending)
+                    ready_waits = [
+                        asyncio.create_task(rdy.wait()) for _, rdy, _s, _t in snapshot
+                    ]
                     get_prio    = asyncio.create_task(priority_pq.get())
                     get_reg     = asyncio.create_task(regular_pq.get())
 
@@ -851,25 +953,32 @@ class WebSocketHandler:
                     now = time.monotonic()
                     if get_prio in done:
                         try:
-                            msgs, rdy = get_prio.result()
-                            pending.insert(0, (msgs, rdy, now))
+                            msgs, rdy, sid = get_prio.result()
+                            pending.insert(0, (msgs, rdy, sid, now))
                         except Exception:
                             pass
                     if get_reg in done:
                         try:
-                            msgs, rdy = get_reg.result()
-                            pending.append((msgs, rdy, now))
+                            msgs, rdy, sid = get_reg.result()
+                            pending.append((msgs, rdy, sid, now))
                         except Exception:
                             pass
 
-                    ready_idx = next(
+                    snap_idx = next(
                         (i for i, t in enumerate(ready_waits) if t in done), None
                     )
-                    if ready_idx is None:
+                    if snap_idx is None:
                         continue  # 새 슬롯 도착 또는 타임아웃 체크, 다시 루프
+                    # 스냅샷에서 고른 슬롯을 현재 pending 에서 동일 객체로 제거
+                    target_slot = snapshot[snap_idx]
+                    ready_idx = next(
+                        (i for i, p in enumerate(pending) if p is target_slot), None
+                    )
+                    if ready_idx is None:
+                        continue  # 이미 타임아웃으로 버려진 슬롯
 
                 # ── 완성된 슬롯 재생 ──────────────────────────────────────────────
-                msgs, _, _ = pending.pop(ready_idx)
+                msgs, _, slot_session_id, _ = pending.pop(ready_idx)
                 _play_idx += 1
                 idx = _play_idx
                 logger.info(
@@ -877,7 +986,7 @@ class WebSocketHandler:
                     f"(pq_regular={regular_pq.qsize()} pq_priority={priority_pq.qsize()} pending={len(pending)})"
                 )
                 try:
-                    await _replay(msgs, idx)
+                    await _replay(msgs, idx, slot_session_id)
                     logger.info(f"[TTS-DBG #{idx}] ✓ replay done")
                     mark_turn_stage("delivered")
                 except asyncio.CancelledError:
@@ -902,8 +1011,11 @@ class WebSocketHandler:
                         pass
                 messages: list = []
                 ready = asyncio.Event()
-                await priority_pq.put((messages, ready))
-                asyncio.create_task(_capture(item, messages, ready))
+                sid = (item.get("metadata") or {}).get(
+                    "session_id"
+                ) or self._active_session_id()
+                await priority_pq.put((messages, ready, sid))
+                asyncio.create_task(_capture(item, messages, ready, sid))
 
         # ── regular consumer (chats, user input) ─────────────────────────────
 
@@ -935,8 +1047,9 @@ class WebSocketHandler:
                     "metadata": {"from_live": True},
                 }
                 msgs, rdy = [], asyncio.Event()
-                await regular_pq.put((msgs, rdy))
-                asyncio.create_task(_capture(batch_item, msgs, rdy))
+                sid = self._active_session_id()
+                await regular_pq.put((msgs, rdy, sid))
+                asyncio.create_task(_capture(batch_item, msgs, rdy, sid))
 
             async def _buffer_timeout() -> None:
                 await asyncio.sleep(CHAT_BUFFER_TIMEOUT)
@@ -964,7 +1077,7 @@ class WebSocketHandler:
                         f" — direct TTS: {overload_line[:40]}"
                     )
                     msgs, rdy = [], asyncio.Event()
-                    await regular_pq.put((msgs, rdy))
+                    await regular_pq.put((msgs, rdy, self._active_session_id()))
                     asyncio.create_task(_capture_direct_tts(overload_line, msgs, rdy))
                     asyncio.create_task(_notify_llm_skipped(drained))
                     continue
@@ -998,8 +1111,13 @@ class WebSocketHandler:
 
                 msgs: list = []
                 rdy = asyncio.Event()
-                await regular_pq.put((msgs, rdy))
-                asyncio.create_task(_capture(item, msgs, rdy))
+                # 입력이 들어온 시점의 세션을 꼬리표로 달아둔다. 이후 사용자가
+                # 다른 세션으로 옮겨가도 이 작업은 자기 세션에 그대로 저장된다.
+                sid = (item.get("metadata") or {}).get(
+                    "session_id"
+                ) or self._active_session_id()
+                await regular_pq.put((msgs, rdy, sid))
+                asyncio.create_task(_capture(item, msgs, rdy, sid))
 
         # ── run all three concurrently ────────────────────────────────────────
 
@@ -1070,19 +1188,30 @@ class WebSocketHandler:
         """
         logger.info(f"[Interrupt] {client_uid}에서 인터럽트 신호 수신")
 
-        # 1. 현재 capture task 취소
-        task = self._current_capture_task
+        # 1. 지금 보고 있는 세션의 capture task만 취소 (다른 세션 작업은 보존)
+        target_sid = str(
+            (data.get("session_id") if isinstance(data, dict) else None)
+            or self._active_session_id()
+        )
+        task = self._capture_tasks.get(target_sid)
         if task and not task.done():
-            logger.info("[Interrupt] 현재 capture task 취소")
+            logger.info(f"[Interrupt] capture task 취소 (session={target_sid})")
             task.cancel()
+        else:
+            logger.info(f"[Interrupt] 취소할 capture task 없음 (session={target_sid})")
 
-        # 2. letta agent abort 플래그 설정
+        # 2. letta agent abort 플래그 설정 (해당 세션만)
         context = self.client_contexts.get(client_uid)
         if context and hasattr(context, "agent_engine"):
             agent = context.agent_engine
             if hasattr(agent, "handle_interrupt"):
-                agent.handle_interrupt("")
-                logger.info("[Interrupt] agent.handle_interrupt() 호출 완료")
+                try:
+                    agent.handle_interrupt("", conversation_id=target_sid)
+                except TypeError:
+                    agent.handle_interrupt("")
+                logger.info(
+                    f"[Interrupt] agent.handle_interrupt(session={target_sid}) 완료"
+                )
 
         # 3. 프론트엔드에 conversation-chain-end 전송
         try:
@@ -1158,11 +1287,17 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"[session] 목록 조회 중 오류: {e}")
             sessions = []
+        active_id = getattr(agent, "active_conversation_id", None) or getattr(
+            agent, "conversation_id", "default"
+        )
         payload = {
             "type": "session-list",
             "sessions": sessions,
-            "active_id": getattr(agent, "conversation_id", "default"),
+            "active_id": active_id,
             "supported": True,
+            # 다중 세션 동시 처리: 지금 돌고 있는 세션과 읽지 않은 발화가 쌓인 세션
+            "running_ids": [sid for sid, t in self._capture_tasks.items() if not t.done()],
+            "unread_ids": [sid for sid, turns in self._session_buffers.items() if turns],
         }
         if extra:
             payload.update(extra)
@@ -1222,15 +1357,29 @@ class WebSocketHandler:
         target = data.get("conversation_id") or "default"
         # 프론트가 세션 이름을 같이 보내면 바로 반영(없으면 agent가 letta에서 조회).
         active = agent.set_conversation(target, name=data.get("name"))
+        pending_turns = len(self._session_buffers.get(active, []))
+        still_running = active in self._capture_tasks
         await websocket.send_text(
             json.dumps(
                 {
                     "type": "session-switched",
                     "active_id": active,
+                    "pending_turns": pending_turns,
+                    "running": still_running,
                 },
                 ensure_ascii=False,
             )
         )
+
+    async def _handle_replay_session_buffer(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """세션으로 넘어와 기록 복원을 끝낸 뒤, 보류된 마지막 발화를 음성으로 재생."""
+        target = str(data.get("conversation_id") or self._active_session_id())
+        if target != self._active_session_id():
+            # 그 사이 또 옮겨갔다면 재생하지 않고 버퍼를 그대로 둔다.
+            return
+        await self._flush_session_buffer(target)
 
     async def _handle_delete_session(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1239,6 +1388,11 @@ class WebSocketHandler:
         if agent is None:
             return
         target = data.get("conversation_id") or ""
+        # 지워지는 세션에서 돌던 작업과 쌓인 발화도 같이 정리
+        _task = self._capture_tasks.pop(target, None)
+        if _task and not _task.done():
+            _task.cancel()
+        self._session_buffers.pop(target, None)
         success = await agent.delete_session(target)
         await self._send_session_list(
             websocket,
@@ -1311,6 +1465,8 @@ class WebSocketHandler:
                     "has_more": result.get("has_more", False),
                     "append": bool(data.get("before")),
                     "supported": True,
+                    "conversation_id": data.get("conversation_id")
+                    or self._active_session_id(),
                 },
                 ensure_ascii=False,
             )
@@ -1483,6 +1639,13 @@ class WebSocketHandler:
             images = None
             # 시스템 오디오도 같은 토글로 묶어 비활성화 가능 (별도 토글 추가 시 분리)
             metadata.pop("system_audio", None)
+
+        # 다중 세션: 입력이 들어온 시점의 세션을 꼬리표로 박아둔다.
+        # 큐에서 꺼낼 때쯤 사용자가 다른 세션으로 옮겨가 있어도 저장 위치가 안 흔들린다.
+        metadata.setdefault(
+            "session_id",
+            str(data.get("session_id") or self._active_session_id()),
+        )
 
         await put_immediate({
             "user_input": user_input,

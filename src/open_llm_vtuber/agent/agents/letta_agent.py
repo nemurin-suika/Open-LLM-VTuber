@@ -8,6 +8,7 @@ import time as _time
 import urllib.parse
 import urllib.request
 import uuid as _uuid
+from contextvars import ContextVar
 from typing import AsyncIterator, Dict, Any, List, Optional, Union
 
 from loguru import logger
@@ -139,6 +140,33 @@ def abort_flag_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
     if key == _DEFAULT_SESSION_KEY:
         return _ABORT_FLAG_FILE
     return f"/tmp/mizuki_abort_{key}.flag"
+
+
+# ── 다중 세션 동시 처리 (TODO19 3단계) ──────────────────────────────────────
+# LettaAgent 인스턴스는 전체 백엔드에서 하나만 공유된다. 그래서 세션 상태를
+# 인스턴스 필드에 두면 두 세션이 동시에 돌 때 서로의 값을 덮어쓴다.
+#
+# 해결: 세션 상태를 ContextVar 로 옮긴다. asyncio.create_task 는 생성 시점의
+# context 를 복사해 task 전용으로 들고 가므로, capture task 시작 시 세션을
+# 한 번 set 하면 그 task 안의 모든 호출(agent.chat 내부 깊은 곳까지)이
+# 자기 세션 값만 보게 된다. 다른 task 에는 전혀 영향이 없다.
+_SESSION_CTX: ContextVar[Optional[str]] = ContextVar(
+    "mizuki_active_session", default=None
+)
+# 실시간 전송 함수(스크린샷·세션 요약)도 세션마다 다르므로 같이 task 격리한다.
+_SEND_FN_CTX: ContextVar[Optional[Any]] = ContextVar(
+    "mizuki_session_send_fn", default=None
+)
+
+
+def bind_session(conversation_id: Optional[str]) -> None:
+    """현재 asyncio task 의 세션을 고정한다 (capture task 진입 시 1회 호출)."""
+    _SESSION_CTX.set(conversation_id or None)
+
+
+def current_bound_session() -> Optional[str]:
+    """현재 task 에 바인딩된 세션 (없으면 None = UI 활성 세션을 따른다)."""
+    return _SESSION_CTX.get()
 
 
 # ── 세션 메타: 사용자가 정한 이름 + 미즈키가 쓰는 최근 대화 한 줄 요약 ──
@@ -444,7 +472,16 @@ def _save_reasoning(text: str) -> None:
         return
     try:
         with open(_REASONING_FILE, "w", encoding="utf-8") as _rf:
-            json.dump({"text": intent, "ts": _time.time()}, _rf, ensure_ascii=False)
+            # session: 동시에 여러 세션이 돌 때 어느 쪽 의도인지 구분하기 위한 꼬리표
+            json.dump(
+                {
+                    "text": intent,
+                    "ts": _time.time(),
+                    "session": _SESSION_CTX.get() or "default",
+                },
+                _rf,
+                ensure_ascii=False,
+            )
     except Exception:
         pass
 
@@ -994,21 +1031,18 @@ class LettaAgent(AgentInterface):
         # 다중 세션: letta conversation 하나 = 프론트 세션 하나.
         # "default"는 기존 단일 세션(messages.conversation_id IS NULL)을 가리키는 특수 키로
         # letta 서버가 agent-direct 모드로 처리한다 → 기존 대화 내역이 그대로 이어진다.
-        self.conversation_id: str = conversation_id or _DEFAULT_SESSION_KEY
-        self._session_key: str = _sanitize_session_key(self.conversation_id)
-        self._notify_file: str = progress_notify_file(self._session_key)
-        self._abort_file: str = abort_flag_file(self._session_key)
-        # 현재 세션 이름(사용자 지정). 발화 앞에 [세션] 태그로 붙여 미즈키에게 알린다.
-        self._session_name: str = (
-            _DEFAULT_SESSION_NAME
-            if self.conversation_id == _DEFAULT_SESSION_KEY
-            else ""
-        )
-        # 인터럽트 플래그: True이면 _chat_raw 스트림 루프를 조기 종료
-        self._abort_flag: bool = False
-        # ADB 스크린샷 실시간 전송용 WebSocket send 함수 (single_conversation.py에서 주입)
-        # 설정 시 generator yield 방식 대신 직접 WebSocket 전송으로 즉시 이미지 전달
-        self._websocket_send_fn: Optional[Any] = None
+        # UI 활성 세션(= 세션 바인딩이 없는 호출의 기본값).
+        self._active_conversation_id: str = conversation_id or _DEFAULT_SESSION_KEY
+        # 세션별 상태 저장소. 동시에 여러 세션이 돌아도 서로 간섭하지 않는다.
+        # 키는 conversation_id, 값은 사용자 지정 이름 / 인터럽트 플래그.
+        self._session_names: Dict[str, str] = {
+            _DEFAULT_SESSION_KEY: _DEFAULT_SESSION_NAME
+        }
+        if self._active_conversation_id != _DEFAULT_SESSION_KEY:
+            self._session_names.setdefault(self._active_conversation_id, "")
+        self._abort_flags: Dict[str, bool] = {}
+        # ADB 스크린샷 실시간 전송용 WebSocket send 함수는 _SEND_FN_CTX(ContextVar)에
+        # 보관한다 → property _websocket_send_fn 참고. 세션마다 다른 값을 쓰기 때문.
         logger.info(
             f"LettaAgent 초기화 완료. agent_id={self.id}, url={self.url}, "
             f"conversation_id={self.conversation_id}"
@@ -1026,6 +1060,61 @@ class LettaAgent(AgentInterface):
                 )
             )
         )
+
+    # ── 세션 상태 (ContextVar 바인딩 우선, 없으면 UI 활성 세션) ────────────
+    # 모든 세션 의존 값을 property 로 계산한다. capture task 가 bind_session()
+    # 으로 자기 세션을 고정했으면 그 값, 아니면 UI 활성 세션을 쓴다.
+
+    @property
+    def conversation_id(self) -> str:
+        return _SESSION_CTX.get() or self._active_conversation_id
+
+    @conversation_id.setter
+    def conversation_id(self, value: Optional[str]) -> None:
+        self._active_conversation_id = value or _DEFAULT_SESSION_KEY
+
+    @property
+    def active_conversation_id(self) -> str:
+        """세션 바인딩을 무시한 UI 활성 세션."""
+        return self._active_conversation_id
+
+    @property
+    def _session_key(self) -> str:
+        return _sanitize_session_key(self.conversation_id)
+
+    @property
+    def _notify_file(self) -> str:
+        return progress_notify_file(self._session_key)
+
+    @property
+    def _abort_file(self) -> str:
+        return abort_flag_file(self._session_key)
+
+    @property
+    def _session_name(self) -> str:
+        cid = self.conversation_id
+        default = _DEFAULT_SESSION_NAME if cid == _DEFAULT_SESSION_KEY else ""
+        return self._session_names.get(cid, default)
+
+    @_session_name.setter
+    def _session_name(self, value: Optional[str]) -> None:
+        self._session_names[self.conversation_id] = (value or "").strip()
+
+    @property
+    def _websocket_send_fn(self) -> Optional[Any]:
+        return _SEND_FN_CTX.get()
+
+    @_websocket_send_fn.setter
+    def _websocket_send_fn(self, value: Optional[Any]) -> None:
+        _SEND_FN_CTX.set(value)
+
+    @property
+    def _abort_flag(self) -> bool:
+        return self._abort_flags.get(self.conversation_id, False)
+
+    @_abort_flag.setter
+    def _abort_flag(self, value: bool) -> None:
+        self._abort_flags[self.conversation_id] = bool(value)
 
     async def fetch_history_messages(
         self,
@@ -1233,8 +1322,7 @@ class LettaAgent(AgentInterface):
         if conversation_id == _DEFAULT_SESSION_KEY:
             _, gist = _load_default_meta()
             _save_default_meta(name or _DEFAULT_SESSION_NAME, gist)
-            if self.conversation_id == _DEFAULT_SESSION_KEY:
-                self._session_name = name or _DEFAULT_SESSION_NAME
+            self._session_names[_DEFAULT_SESSION_KEY] = name or _DEFAULT_SESSION_NAME
             return True
         _, gist = await self._fetch_session_meta(conversation_id)
         try:
@@ -1244,8 +1332,7 @@ class LettaAgent(AgentInterface):
         except Exception as e:
             logger.error(f"[session] 이름 수정 실패 (id={conversation_id}): {e}")
             return False
-        if conversation_id == self.conversation_id:
-            self._session_name = name
+        self._session_names[conversation_id] = name
         return True
 
     async def update_session_gist(self, conversation_id: str, gist: str) -> bool:
@@ -1280,22 +1367,21 @@ class LettaAgent(AgentInterface):
         """
         target = conversation_id or _DEFAULT_SESSION_KEY
         if name is not None:
-            self._session_name = (name or "").strip()
-        if target == self.conversation_id:
-            return target
-        self.conversation_id = target
-        if name is None:
+            self._session_names[target] = (name or "").strip()
+        elif target not in self._session_names:
             # 이름을 못 받았으면 다음 발화 때 다시 채우도록 비워둔다.
-            self._session_name = (
+            self._session_names[target] = (
                 _DEFAULT_SESSION_NAME if target == _DEFAULT_SESSION_KEY else ""
             )
-        self._session_key = _sanitize_session_key(target)
-        self._notify_file = progress_notify_file(self._session_key)
-        self._abort_file = abort_flag_file(self._session_key)
-        self._abort_flag = False
+        if target == self._active_conversation_id:
+            return target
+        # 진행 중인 다른 세션의 abort 플래그는 건드리지 않는다(동시 실행 보호).
+        self._active_conversation_id = target
+        self._abort_flags[target] = False
         logger.info(
             f"[session] 활성 세션 전환 → {target} "
-            f"(key={self._session_key}, notify={self._notify_file})"
+            f"(key={_sanitize_session_key(target)}, "
+            f"notify={progress_notify_file(_sanitize_session_key(target))})"
         )
         return target
 
@@ -1303,20 +1389,27 @@ class LettaAgent(AgentInterface):
         # The Letta Server automatically stores historical messages, so this part is not needed
         pass
 
-    def handle_interrupt(self, heard_response: str) -> None:
+    def handle_interrupt(
+        self, heard_response: str, conversation_id: Optional[str] = None
+    ) -> None:
         """인터럽트 신호 수신 시 _chat_raw 스트림 루프와 letta 서버의 claude -p subprocess를 종료.
 
         1. _abort_flag = True → 스트리밍 루프 조기 break
         2. abort 파일 생성 → letta 서버의 claude_cli_client.py watcher가 감지해서 proc.kill()
         """
-        self._abort_flag = True
+        target = conversation_id or self.conversation_id
+        self._abort_flags[target] = True
+        abort_path = abort_flag_file(_sanitize_session_key(target))
         try:
-            with open(self._abort_file, "w", encoding="utf-8") as _af:
+            with open(abort_path, "w", encoding="utf-8") as _af:
                 _af.write(str(_time.time()))
-            logger.info(f"[LettaAgent] abort 파일 생성: {self._abort_file}")
+            logger.info(f"[LettaAgent] abort 파일 생성: {abort_path}")
         except Exception as _e:
             logger.warning(f"[LettaAgent] abort 파일 생성 실패 (무시): {_e}")
-        logger.info("[LettaAgent] 인터럽트 신호 수신 → _abort_flag + abort 파일 설정")
+        logger.info(
+            f"[LettaAgent] 인터럽트 신호 수신 (session={target}) "
+            "→ _abort_flag + abort 파일 설정"
+        )
 
     async def chat(  # type: ignore[override]
         self,
