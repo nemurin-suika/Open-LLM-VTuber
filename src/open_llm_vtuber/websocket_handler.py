@@ -32,6 +32,7 @@ from .conversations.conversation_handler import (
 from .conversations.single_conversation import process_single_conversation
 from .message_handler import message_handler
 from .tool_approval import ToolApprovalManager
+from . import session_log
 
 
 # ── 턴 완료 마커 ──────────────────────────────────────────────────────────────
@@ -642,6 +643,11 @@ class WebSocketHandler:
                                             _ts = _entry.get("ts")
                                             if _ts and _ts not in _seen_notify_ts:
                                                 _seen_notify_ts.add(_ts)
+                                                # letta 에는 알림이 저장되지 않으므로
+                                                # 세션 보조 로그에 남겨 복원에 쓴다.
+                                                session_log.log_progress(
+                                                    sid, _entry.get("text", ""), _ts
+                                                )
                                                 await ws.send_text(json.dumps({
                                                     "type": "progress_update",
                                                     "text": _entry.get("text", ""),
@@ -1423,6 +1429,7 @@ class WebSocketHandler:
         if _task and not _task.done():
             _task.cancel()
         self._session_buffers.pop(target, None)
+        session_log.drop_session_log(target)
         success = await agent.delete_session(target)
         await self._send_session_list(
             websocket,
@@ -1486,11 +1493,23 @@ class WebSocketHandler:
             logger.error(f"[history] letta 히스토리 조회 중 오류: {e}")
             result = {"messages": [], "oldest_id": None, "has_more": False}
 
+        restored = result.get("messages", [])
+        # 아직 letta 에 저장되지 않은 발화와 중간 알림을 보조 로그에서 덧댄다.
+        # 위로 스크롤한 추가 로드(before)에서는 과거 구간만 보내므로 건드리지 않는다.
+        if not data.get("before"):
+            try:
+                restored = session_log.merge_history(
+                    data.get("conversation_id") or self._active_session_id(),
+                    restored,
+                )
+            except Exception as e:
+                logger.error(f"[history] 보조 로그 병합 실패: {e}")
+
         await websocket.send_text(
             json.dumps(
                 {
                     "type": "letta-history-data",
-                    "messages": result.get("messages", []),
+                    "messages": restored,
                     "oldest_id": result.get("oldest_id"),
                     "has_more": result.get("has_more", False),
                     "append": bool(data.get("before")),
@@ -1676,6 +1695,12 @@ class WebSocketHandler:
             "session_id",
             str(data.get("session_id") or self._active_session_id()),
         )
+
+        # letta 는 턴이 끝난 뒤에야 발화를 저장한다. 작업을 시켜 두고 다른 세션에
+        # 갔다 돌아왔을 때 방금 시킨 말이 화면에서 사라지지 않도록, 받은 즉시
+        # 세션 보조 로그에 남긴다. (자발 발화 트리거는 네무린 말이 아니라 제외)
+        if msg_type == "text-input" and isinstance(user_input, str):
+            session_log.log_user_message(metadata["session_id"], user_input)
 
         await put_immediate({
             "user_input": user_input,

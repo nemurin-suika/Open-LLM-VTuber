@@ -1186,6 +1186,8 @@ class LettaAgent(AgentInterface):
                 {
                     "id": str(getattr(msg, "id", "") or ""),
                     "role": role,
+                    # 프론트는 type 으로 표시 모양을 고른다 (text / progress_update).
+                    "type": "text",
                     "content": text,
                     "timestamp": str(date) if date else "",
                 }
