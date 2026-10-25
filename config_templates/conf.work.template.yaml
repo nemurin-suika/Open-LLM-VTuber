@@ -1,0 +1,198 @@
+# =============================================================================
+# conf.work.template.yaml — 다른 맥(회사 노트북 등)에 새로 깔 때 쓰는 conf 템플릿
+# =============================================================================
+#
+# 이 파일은 그대로 쓰는 설정 파일이 아니다. scripts/make_conf.py 가 이 파일의
+# __PLACEHOLDER__ 를 치환해서 레포 루트에 conf.yaml 을 만들어 낸다.
+#
+#   python3 scripts/make_conf.py                 # 대화형으로 물어보며 생성
+#   python3 scripts/make_conf.py --defaults      # 전부 기본값으로 생성
+#   python3 scripts/make_conf.py --persona ~/my_persona.txt
+#
+# conf.yaml 은 .gitignore 대상이다. 페르소나 프롬프트가 들어가므로 절대
+# 공개 저장소에 커밋하지 않는다. 템플릿(이 파일)에는 프롬프트도 비밀값도 없다.
+#
+# 이 템플릿이 전제하는 구성 (집 운영 환경과 다른 점):
+#   - 전부 로컬(127.0.0.1) 기준. 다른 기기에서 접속하지 않는다.
+#   - 마이크 입력(ASR) 없음        → asr_config.asr_model: null
+#   - 시스템 오디오 분석 없음      → analyze_audio_url 미설정
+#   - 라이브 플랫폼 연동 없음      → enable_proxy: false, live_config 없음
+#   - 대화 + TTS + Live2D + DB 만 쓴다.
+# =============================================================================
+
+system_config:
+  conf_version: 'v1.2.1'
+
+  # 로컬 전용. 다른 기기에서 붙으려면 '0.0.0.0' 으로 바꾼다.
+  host: '__HOST__'
+  port: __PORT__
+
+  # 치지직/빌리빌리 같은 라이브 플랫폼 연동용 프록시. 안 쓰면 false.
+  enable_proxy: false
+
+  # [스크린샷] 태그로 화면 캡처 경로를 LLM 에 넘기는 기능.
+  # 회사 장비에서 화면을 캡처해 외부로 보내는 것이 걸리면 false 로 둔다.
+  enable_screen_capture: __ENABLE_SCREEN_CAPTURE__
+
+  # analyze_audio_url: 시스템 오디오 분석 서버. 이 구성에서는 쓰지 않으므로 생략.
+
+  config_alts_dir: 'characters'
+
+  # 페르소나 뒤에 붙는 툴 프롬프트. 파일 실체는 prompts/utils/ 에 있다.
+  tool_prompts:
+    # Live2D 표정 키워드 안내. [<insert_emomap_keys>] 자리에 model_dict.json 의
+    # emotionMap 키가 자동으로 채워진다. Live2D 를 쓴다면 켜 두는 것이 좋다.
+    live2d_expression_prompt: 'live2d_expression_prompt'
+    # TTS 가 읽을 수 없는 마크다운 문법을 쓰지 않게 한다.
+    no_markdown_prompt: 'no_markdown_prompt'
+    # 특수 출력 태그(이미지 첨부 등) 설명.
+    output_format_prompt: 'output_format_prompt'
+    # [volume_up] / [volume_down] 으로 TTS 음량을 조절하게 한다.
+    volume_control_prompt: 'volume_control_prompt'
+    # 아래는 선택. 입력 형식 프롬프트는 방송 채팅·스크린샷 같은 입력 섹션을
+    # 설명하는 내용이라, 그 기능을 안 쓰는 구성에서는 켜지 않는 편이 낫다.
+    # input_format_prompt: 'input_format_prompt'
+    # proactive_speak_private_prompt: 'proactive_speak_private_prompt'
+    # think_tag_prompt: 'think_tag_prompt'
+
+  # 머리카락·옷을 흔드는 바람 효과. 모델 physics 설정에 따라 체감이 다르다.
+  wind_effect:
+    enabled: false
+    max_strength: 0.1
+    transition_speed: 0.5
+    interval_min: 3.0
+    interval_max: 8.0
+
+  # 응답하지 않는 동안 시선이 자연스럽게 떠돌게 한다.
+  idle_gaze:
+    enabled: true
+    range_x: 0.7
+    range_y: 0.6
+    transition_speed: 0.5
+    interval_min: 3.0
+    interval_max: 8.0
+
+character_config:
+  conf_name: '__CONF_NAME__'
+  conf_uid: '__CONF_UID__'
+
+  # model_dict.json 의 name 과 정확히 같아야 한다.
+  # 모델을 새로 붙이는 절차는 doc/LIVE2D_MODEL_SETUP.md 참고.
+  live2d_model_name: '__LIVE2D_MODEL_NAME__'
+
+  character_name: '__CHARACTER_NAME__'
+  # avatars/ 폴더에 둔 정사각형 이미지. 비워 두면 이름 첫 글자를 쓴다.
+  avatar: ''
+  # TTS 가 읽기 전에 걸러낼 호출 키워드(자기 이름 등). 비워도 된다.
+  voice_keyword_filter: []
+  human_name: '__HUMAN_NAME__'
+
+  # ============== Persona ==============
+  # 아래 블록은 make_conf.py 가 --persona 로 받은 파일 내용으로 채운다.
+  # 지정하지 않으면 최소한의 자리표시 문구만 들어가므로, 생성 후 직접 고친다.
+  persona_prompt: |
+__PERSONA_PROMPT__
+
+  agent_config:
+    conversation_agent_choice: 'letta_agent'
+
+    agent_settings:
+      letta_agent:
+        host: '__LETTA_HOST__'
+        port: __LETTA_PORT__
+        # 비워 두면 기동 시 run.sh 가 'Open-LLM-VTuber' 에이전트를 찾거나
+        # 새로 만들고, 그 id 를 이 자리에 자동으로 적어 넣는다.
+        id: ''
+        faster_first_response: True
+        segment_method: 'pysbd'
+        # 실제로 돌아가는 LLM 은 letta 쪽 설정이다. letta 서버가 알아듣는
+        # handle 을 적는다. 예: 'claude_cli/claude-opus-5'
+        model: '__LETTA_MODEL__'
+        # 임베딩 모델 handle. ollama 를 쓸 경우 먼저 `ollama pull bge-m3` 필요.
+        embedding: '__LETTA_EMBEDDING__'
+        context_window_limit: __CONTEXT_WINDOW_LIMIT__
+
+    llm_configs:
+      # letta_agent 를 쓰면 아래는 실제로 사용되지 않는다. 다른 에이전트로
+      # 갈아탈 때만 채우면 된다. 키를 적어 넣었다면 conf.yaml 을 절대
+      # 커밋하지 않도록 주의할 것.
+      openai_compatible_llm:
+        base_url: 'http://localhost:11434/v1'
+        llm_api_key: ''
+        llm_api_keys: []
+        model: 'qwen2.5:latest'
+        temperature: 1.0
+        interrupt_method: 'user'
+
+  # === 음성 인식 (ASR) ===
+  # null 이면 ASR 을 아예 초기화하지 않는다. 마이크를 쓰지 않는 구성에서는
+  # 이렇게 두는 것이 맞다. 모델 파일(sherpa-onnx 등)을 받아 둘 필요도 없다.
+  # 마이크를 쓰려면 'sherpa_onnx_asr' 등으로 바꾸고 해당 블록을 채운다.
+  asr_config:
+    asr_model: __ASR_MODEL__
+    sherpa_onnx_asr:
+      model_type: 'sense_voice'
+      sense_voice: './models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx'
+      tokens: './models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt'
+      num_threads: 4
+      use_itn: True
+      provider: 'cpu'
+
+  # === 음성 합성 (TTS) ===
+  # 기본값은 edge_tts. 설치할 것이 없고 바로 소리가 난다. 목소리를 따로
+  # 준비했다면 tts_model 을 'gpt_sovits_tts' 로 바꾸고 아래 블록을 채운다.
+  tts_config:
+    tts_model: '__TTS_MODEL__'
+
+    edge_tts:
+      # 한국어 예시: ko-KR-SunHiNeural, ko-KR-SeoHyeonNeural, ko-KR-InJoonNeural
+      voice: '__EDGE_TTS_VOICE__'
+
+    gpt_sovits_tts:
+      api_url: '__GPT_SOVITS_API_URL__'
+      fallback_api_urls: []
+      # 연결 거부/끊김은 이 시간 안에 드러난다. read 타임아웃까지 기다리지 않고 폴백.
+      connect_timeout: 3.0
+      read_timeout: 600.0
+      text_lang: 'ko'
+      # 참조 음성 파일. GPT-SoVITS 서버 쪽에서 찾을 수 있는 경로여야 한다.
+      # 이 파일은 저장소에 올라가지 않으므로 직접 옮겨 둔다.
+      ref_audio_path: '__GPT_SOVITS_REF_AUDIO__'
+      prompt_lang: 'ko'
+      # 참조 음성에서 실제로 말하는 내용을 그대로 적는다.
+      prompt_text: '__GPT_SOVITS_PROMPT_TEXT__'
+      text_split_method: 'cut5'
+      batch_size: '1'
+      media_type: 'wav'
+      streaming_mode: 'false'
+
+  # === 음성 활동 감지 (VAD) ===
+  # 마이크를 쓰지 않으면 null 로 둔다.
+  vad_config:
+    vad_model: __VAD_MODEL__
+    silero_vad:
+      orig_sr: 16000
+      target_sr: 16000
+      prob_threshold: 0.4
+      db_threshold: 60
+      required_hits: 3
+      required_misses: 24
+      smoothing_window: 5
+
+  # === TTS 전처리 ===
+  # 대괄호/괄호/별표 안쪽은 읽지 않는다. 표정 키워드가 소리로 새어 나가지
+  # 않게 하는 설정이므로 ignore_brackets 는 켜 두는 것이 좋다.
+  tts_preprocessor_config:
+    remove_special_char: True
+    ignore_brackets: True
+    ignore_parentheses: True
+    ignore_asterisks: True
+    ignore_angle_brackets: True
+    translator_config:
+      translate_audio: False
+      translate_provider: 'deeplx'
+      deeplx:
+        deeplx_target_lang: 'JA'
+        deeplx_api_endpoint: 'http://localhost:1188/v2/translate'
+
+# live_config: 치지직/빌리빌리 연동 설정. 이 구성에서는 쓰지 않으므로 생략한다.

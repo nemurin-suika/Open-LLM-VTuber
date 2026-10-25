@@ -1,5 +1,7 @@
 # ignore the user configuration file
 conf.yaml
+# make_conf.py 가 덮어쓸 때 남기는 백업
+conf.yaml.bak-*
 
 # ignore non-default background images
 /backgrounds/*
