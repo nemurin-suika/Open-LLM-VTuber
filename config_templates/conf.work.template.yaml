@@ -163,6 +163,8 @@ __PERSONA_PROMPT__
       ref_audio_path: '__GPT_SOVITS_REF_AUDIO__'
       prompt_lang: 'ko'
       # 참조 음성에서 실제로 말하는 내용을 그대로 적는다.
+      # 사람이 직접 들어보고 받아 적는다. 자동 전사는 조사나 어미를 틀리게
+      # 잡는 일이 있고, 대사가 어긋나면 발음이 조용히 뭉개진다.
       prompt_text: '__GPT_SOVITS_PROMPT_TEXT__'
       text_split_method: 'cut5'
       batch_size: '1'

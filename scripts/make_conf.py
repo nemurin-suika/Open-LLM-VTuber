@@ -95,9 +95,8 @@ FIELDS = [
           "http://127.0.0.1:9880/tts", "GPT-SoVITS API 주소"),
     Field("gpt_sovits_ref_audio", "__GPT_SOVITS_REF_AUDIO__", "saki.wav",
           "GPT-SoVITS 참조 음성 파일 (GPT-SoVITS 루트 기준 상대경로)"),
-    Field("gpt_sovits_prompt_text", "__GPT_SOVITS_PROMPT_TEXT__",
-          "내부가 뻑뻑해서 그런지 조금도 움직이질 않아.",
-          "참조 음성에서 말하는 내용 그대로"),
+    Field("gpt_sovits_prompt_text", "__GPT_SOVITS_PROMPT_TEXT__", "",
+          "참조 음성에서 말하는 내용 그대로 (사람이 직접 받아 적는다)"),
 ]
 
 # tts_model 이 edge_tts 일 때는 물어볼 필요가 없는 항목들.
@@ -275,6 +274,11 @@ def main() -> int:
     if values["tts_model"] == "gpt_sovits_tts":
         print(f"  - GPT-SoVITS 서버({values['gpt_sovits_api_url']})가 떠 있어야 하고, "
               f"참조 음성 '{values['gpt_sovits_ref_audio']}' 를 옮겨 둬야 합니다.")
+        if values["gpt_sovits_prompt_text"].strip() == "":
+            print("  - prompt_text 가 비어 있습니다. 참조 음성이 말하는 내용을 "
+                  "직접 받아 적어 conf.yaml 의 prompt_text 에 넣으세요.")
+            print("    (자동 전사는 틀릴 수 있어서 기본값을 두지 않습니다. "
+                  "대사가 어긋나면 발음이 뭉개집니다.)")
     if values["asr_model"] == "null":
         print("  - 마이크 입력은 꺼져 있습니다. 쓰려면 asr_model 과 vad_model 을 채우세요.")
     return 0

@@ -92,3 +92,13 @@ model_dict_wv.json
 
 # yt-dlp binary (local install)
 yt-dlp_macos
+# 음성 파일(참조 음성·합성 결과)은 저장소에 올리지 않는다.
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.aac
+*.opus
+*.aiff
+*.wma
