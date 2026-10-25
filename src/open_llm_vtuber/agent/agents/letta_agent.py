@@ -1610,6 +1610,15 @@ class LettaAgent(AgentInterface):
         _yielded = 0
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
+        # 발화 방식 분기 (머신별 설정)
+        #   false(기본, 집): 여러 step 에 걸친 모든 assistant_message 를 그대로 흘려보낸다.
+        #                    → 상위에서 captured 에 쌓였다가 전부 TTS 로 읽힌다.
+        #   true(회사/codex): 툴을 쓰는 step 의 대사는 progress_update(텍스트)로만 내보내고
+        #                    스트림 마지막 덩어리만 음성으로 읽는다.
+        # 환경변수 MIZUKI_SPEAK_ONLY_FINAL=1 로 켠다.
+        _speak_only_final = str(
+            os.environ.get("MIZUKI_SPEAK_ONLY_FINAL", "")
+        ).strip().lower() in ("1", "true", "yes", "on")
         _pending_speech = ""
         _had_tool_call = False
         _stream_failed = False
@@ -1857,17 +1866,26 @@ class LettaAgent(AgentInterface):
                         _save_reasoning(last_reasoning, self.conversation_id)
                     if not text:
                         continue
-                    _pending_speech += text
+                    if _speak_only_final:
+                        _pending_speech += text
+                        continue
+                    # 기본(집): 받은 대사를 그대로 흘려보낸다
+                    _yielded += 1
+                    yield text
                     continue
                 elif token.message_type == "letta_error":
                     logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
                     _stream_failed = True
                     continue
                 elif token.message_type == "tool_call_message":
-                    if _pending_speech and _pending_speech not in _found_notifies:
-                        yield {"type": "progress_update", "text": _pending_speech, "timestamp": _time.time()}
-                        _found_notifies.add(_pending_speech)
-                    _pending_speech = ""
+                    if _speak_only_final:
+                        if _pending_speech and _pending_speech not in _found_notifies:
+                            yield {"type": "progress_update", "text": _pending_speech, "timestamp": _time.time()}
+                            _found_notifies.add(_pending_speech)
+                        _pending_speech = ""
+                    else:
+                        # 기본(집): step 마다 알림 중복 방지 집합을 비운다
+                        _found_notifies = set()
                     _had_tool_call = True
                     _tc = getattr(token, "tool_call", None)
                     tool_name = getattr(_tc, "name", None) or "unknown"
@@ -1909,15 +1927,21 @@ class LettaAgent(AgentInterface):
                     continue
 
             if not self._abort_flag:
-                if _stream_failed:
+                if _speak_only_final:
+                    if _stream_failed:
+                        _yielded += 1
+                        yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
+                    elif _pending_speech:
+                        _yielded += 1
+                        yield _pending_speech
+                    elif _had_tool_call:
+                        _yielded += 1
+                        yield "작업이 완료되기 전에 응답이 중단됐습니다. 진행 내역을 확인해주세요."
+                elif _stream_failed and _yielded == 0:
+                    # 기본(집)에서는 대사를 이미 다 흘려보냈으므로, 한 마디도 못 한
+                    # 경우에만 중단 사실을 알린다. 정상 대사를 덮어쓰지 않는다.
                     _yielded += 1
                     yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
-                elif _pending_speech:
-                    _yielded += 1
-                    yield _pending_speech
-                elif _had_tool_call:
-                    _yielded += 1
-                    yield "작업이 완료되기 전에 응답이 중단됐습니다. 진행 내역을 확인해주세요."
 
             # 스트림 종료 후 남은 ADB 스크린샷 마지막 flush
             while not _image_queue.empty():

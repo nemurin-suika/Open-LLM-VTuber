@@ -102,3 +102,6 @@ yt-dlp_macos
 *.opus
 *.aiff
 *.wma
+
+# 툴 승인 hook 설정 — 저장소 절대경로가 들어가므로 머신별 생성 (템플릿만 추적)
+scripts/claude_hook_settings.json
