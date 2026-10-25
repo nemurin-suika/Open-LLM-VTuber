@@ -236,6 +236,16 @@ class WebSocketHandler:
         """대기 말풍선에 보여줄 문구."""
         raw = item.get("user_input")
         if isinstance(raw, str):
+            if raw.strip():
+                return raw
+            # 첨부 이미지만 올려 보낸 경우 — 빈 칩이 뜨지 않게 장수로 대신한다.
+            uploaded = sum(
+                1
+                for img in (item.get("images") or [])
+                if isinstance(img, dict) and img.get("source") == "upload"
+            )
+            if uploaded:
+                return f"[이미지 {uploaded}장]"
             return raw
         return "[음성 입력]"
 

@@ -271,6 +271,17 @@ _MIME_BY_EXT = {
     ".bmp": "image/bmp",
 }
 
+# 프론트에서 올라온 이미지를 /tmp 에 떨어뜨릴 때 쓸 확장자.
+# Read 도구가 확장자로 포맷을 판별하므로 mime 과 맞춰줘야 한다.
+_IMAGE_EXT_BY_MIME = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+}
+
 
 def _load_local_image_as_b64(path: str) -> tuple[str, str, str]:
     """로컬 파일 경로 → (base64, mime, label). 실패 시 ("", "", "")."""
@@ -1503,7 +1514,11 @@ class LettaAgent(AgentInterface):
                 if img_data.startswith("data:") and "," in img_data:
                     img_data = img_data.split(",", 1)[1]
                 source = img.source.value if hasattr(img.source, "value") else str(img.source)
-                temp_path = f"/tmp/claude_screenshot_{_uuid.uuid4().hex}.jpg"
+                mime = getattr(img, "media_type", None) or getattr(img, "mime_type", None) or "image/jpeg"
+                # Read 도구는 확장자로 이미지 포맷을 판별하므로 mime 에 맞춰 붙인다.
+                # (첨부 업로드는 PNG·WebP 등 JPEG 가 아닌 원본이 그대로 올라올 수 있다)
+                ext = _IMAGE_EXT_BY_MIME.get(str(mime).strip().lower(), "jpg")
+                temp_path = f"/tmp/claude_screenshot_{_uuid.uuid4().hex}.{ext}"
                 await asyncio.to_thread(
                     lambda p=temp_path, d=img_data: open(p, "wb").write(_base64.b64decode(d))
                 )
@@ -1513,10 +1528,17 @@ class LettaAgent(AgentInterface):
                     ago_attr = f" ago={ago:g}s"
                 else:
                     ago_attr = ""
-                screenshot_tags.append(f"[스크린샷 source={source}{ago_attr}]{temp_path}[/스크린샷]")
-                logger.info(f"[Screenshot] temp 저장: {temp_path} (source={source}{ago_attr})")
+                # 직접 첨부한 파일은 원본 이름에 단서가 있는 경우가 많아 같이 넘긴다.
+                raw_name = (getattr(img, "name", None) or "").strip()
+                safe_name = raw_name.replace("[", "(").replace("]", ")").replace('"', "'")
+                name_attr = f' name="{safe_name}"' if safe_name else ""
+                screenshot_tags.append(
+                    f"[스크린샷 source={source}{ago_attr}{name_attr}]{temp_path}[/스크린샷]"
+                )
+                logger.info(
+                    f"[Screenshot] temp 저장: {temp_path} (source={source}{ago_attr}{name_attr})"
+                )
                 # ── 스크린샷도 프론트에 전송 ──
-                mime = getattr(img, "media_type", None) or getattr(img, "mime_type", None) or "image/jpeg"
                 yield {"type": "image_display", "image_base64": img_data, "mime_type": mime, "label": source}
             text = "\n".join(screenshot_tags) + "\n" + text
 

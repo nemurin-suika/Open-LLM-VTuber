@@ -34,6 +34,7 @@ def create_batch_input(
                 data=img["data"],
                 mime_type=img["mime_type"],
                 ago_seconds=img.get("ago_seconds"),
+                name=img.get("name"),
             )
             for img in (images or [])
         ]
