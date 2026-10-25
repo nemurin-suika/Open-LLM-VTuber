@@ -1,28 +1,45 @@
 [
-    {
-        "name": "mao_pro",
-        "description": "",
-        "url": "/live2d-models/wanmei_vts/运行文件.model3.json",
-        "kScale": 0.7,
-        "initialXshift": 0,
-        "initialYshift": 0,
-        "kXOffset": 1150,
-        "defaultEmotion": -1,
-        "emotionMap": {
-            "화남": 3,
-            "역겨움": 1,
-            "즐거움": 6,
-            "슬픔": 2,
-            "부끄러움": 0,
-            "혼란함": 7
-        },
-        "tapMotions": {
-            "HitAreaHead": {
-                "": 1
-            },
-            "HitAreaBody": {
-                "": 1
-            }
-        }
+  {
+    "name": "mao_pro",
+    "url": "/live2d-models/mao_pro/runtime/mao_pro.model3.json",
+    "kScale": 0.5,
+    "initialXshift": 0,
+    "initialYshift": 0,
+    "defaultEmotion": 0,
+    "emotionMap": {
+      "neutral": 0,
+      "anger": 2,
+      "disgust": 2,
+      "fear": 1,
+      "joy": 3,
+      "smirk": 3,
+      "sadness": 1,
+      "surprise": 3
+    },
+    "tapMotions": {
+      "HitAreaHead": {
+        "": 1
+      },
+      "HitAreaBody": {
+        "": 1
+      }
     }
+  },
+  {
+    "name": "wanmei_vts",
+    "url": "/live2d-models/wanmei_vts/运行文件.model3.json",
+    "kScale": 0.7,
+    "initialXshift": 0,
+    "initialYshift": 0,
+    "defaultEmotion": "중립",
+    "emotionMap": {
+      "중립": 8,
+      "화남": 3,
+      "역겨움": 1,
+      "즐거움": 6,
+      "슬픔": 2,
+      "부끄러움": 0,
+      "혼란함": 7
+    }
+  }
 ]
