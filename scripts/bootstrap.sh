@@ -12,13 +12,14 @@
 #
 # 하는 일:
 #   1. 필요한 도구 점검 (없으면 brew 로 설치할지 물어본다)
-#   2. letta / 프론트엔드 저장소 클론
+#   2. letta / 프론트엔드 / GPT-SoVITS 저장소 클론
 #   3. frontend 심볼릭 링크 연결
 #   4. 이 맥에 맞게 절대경로·주소 치환
 #   5. PostgreSQL 데이터 디렉토리 초기화
 #   6. 의존성 설치 (uv sync / npm install)
-#   7. conf.yaml 생성
-#   8. 손으로 옮겨야 하는 것들 안내
+#   7. GPT-SoVITS 설치 (파이썬 3.9 환경 + 한국어 추론분 모델 약 1.3G)
+#   8. conf.yaml 생성
+#   9. 손으로 옮겨야 하는 것들 안내
 #
 # 안 하는 일 (일부러):
 #   - launchd 등록. 상주 운영 설정은 환경마다 다르므로 손대지 않는다.
@@ -30,6 +31,7 @@
 #   --yes          되묻지 않고 전부 진행 (brew 설치 포함)
 #   --skip-brew    패키지 설치를 건너뛴다 (점검만)
 #   --skip-npm     프론트엔드 의존성 설치를 건너뛴다
+#   --skip-tts     GPT-SoVITS 설치를 건너뛴다 (edge_tts 로 먼저 써 볼 때)
 # =============================================================================
 
 set -u
@@ -41,6 +43,7 @@ BASE_DIR="$(dirname "$REPO_ROOT")"
 ASSUME_YES=0
 SKIP_BREW=0
 SKIP_NPM=0
+SKIP_TTS=0
 
 LETTA_REPO="https://github.com/nemurin-suika/letta.git"
 LETTA_BRANCH="nemurin"
@@ -50,6 +53,11 @@ WEB_REPO="https://github.com/nemurin-suika/Open-LLM-VTuber-Web.git"
 WEB_BRANCH="nemurin"
 WEB_DIRNAME="Open-LLM-VTuber-Web"
 
+# 목소리(GPT-SoVITS 추론 서버). 같은 기기에 함께 띄워 쓴다.
+TTS_REPO="https://github.com/nemurin-suika/GPT-SoVITS.git"
+TTS_BRANCH="nemurin"
+TTS_DIRNAME="GPT-SoVITS-v3lora-20250228"
+
 BREW_PACKAGES=(postgresql@17 redis node ollama)
 
 while [ $# -gt 0 ]; do
@@ -58,6 +66,7 @@ while [ $# -gt 0 ]; do
         --yes|-y)    ASSUME_YES=1; shift ;;
         --skip-brew) SKIP_BREW=1; shift ;;
         --skip-npm)  SKIP_NPM=1; shift ;;
+        --skip-tts)  SKIP_TTS=1; shift ;;
         -h|--help)   sed -n '2,40p' "$0"; exit 0 ;;
         *) echo "모르는 옵션: $1" >&2; exit 1 ;;
     esac
@@ -161,8 +170,14 @@ step "저장소 준비"
 mkdir -p "$BASE_DIR"
 LETTA_DIR="$BASE_DIR/$LETTA_DIRNAME"
 WEB_DIR="$BASE_DIR/$WEB_DIRNAME"
+TTS_DIR="$BASE_DIR/$TTS_DIRNAME"
 clone_or_update "$LETTA_REPO" "$LETTA_BRANCH" "$LETTA_DIR" "letta"
 clone_or_update "$WEB_REPO"   "$WEB_BRANCH"   "$WEB_DIR"   "프론트엔드"
+if [ "$SKIP_TTS" = "1" ]; then
+    info "GPT-SoVITS: --skip-tts 지정됨 — 클론 건너뜀"
+else
+    clone_or_update "$TTS_REPO" "$TTS_BRANCH" "$TTS_DIR" "GPT-SoVITS"
+fi
 
 # ── 3. frontend 심볼릭 링크 ───────────────────────────────────────────────────
 step "frontend 링크 연결"
@@ -266,6 +281,22 @@ else
     warn "npm 이 없습니다. node 설치 후 '$WEB_DIR' 에서 npm install 을 돌리세요."
 fi
 
+step "GPT-SoVITS 설치 (목소리)"
+# 파이썬 3.9 전용 환경과 1.3G 가량의 모델을 받는다. 처음이면 오래 걸린다.
+# 백엔드와 버전이 겹치지 않으므로 저장소 안의 .venv 를 따로 쓴다.
+if [ "$SKIP_TTS" = "1" ]; then
+    info "--skip-tts 지정됨 — 건너뜀"
+    info "나중에 깔려면: $TTS_DIR/scripts/setup-mac.sh"
+elif [ -x "$TTS_DIR/scripts/setup-mac.sh" ]; then
+    if [ "$ASSUME_YES" = "1" ]; then
+        "$TTS_DIR/scripts/setup-mac.sh" --yes || warn "GPT-SoVITS 설치 실패 — 직접 확인하세요."
+    else
+        "$TTS_DIR/scripts/setup-mac.sh" || warn "GPT-SoVITS 설치 실패 — 직접 확인하세요."
+    fi
+else
+    warn "$TTS_DIR/scripts/setup-mac.sh 가 없습니다. 클론을 확인하세요."
+fi
+
 # ── 8. 임베딩 모델 ────────────────────────────────────────────────────────────
 step "임베딩 모델 (ollama bge-m3)"
 if command -v ollama >/dev/null 2>&1; then
@@ -319,10 +350,14 @@ cat <<GUIDE
    에 넣고, 같은 폴더 기준으로 model_dict.json 에 항목을 추가하세요.
    붙이는 절차와 흔한 함정은 doc/LIVE2D_MODEL_SETUP.md 에 정리돼 있습니다.
 
-2) 목소리
-   기본값은 edge_tts 라 바로 소리가 납니다. 따로 학습한 목소리를 쓰려면
-   TTS 서버를 띄운 뒤 conf.yaml 의 tts_model 을 gpt_sovits_tts 로 바꾸고,
-   참조 음성 파일을 TTS 서버가 찾을 수 있는 위치에 두세요.
+2) 목소리 참조 음성
+   저작권 자료라 저장소에 들어 있지 않습니다. wav 파일을
+     $TTS_DIR/
+   루트에 두세요. mp3 라면 먼저 변환합니다.
+     ffmpeg -i <원본>.mp3 -c:a pcm_s16le <이름>.wav
+   그리고 conf.yaml 의 ref_audio_path 와 prompt_text 를 그 파일에 맞춥니다.
+   prompt_text 는 그 음성이 실제로 말하는 내용이어야 합니다.
+   소리만 먼저 확인하고 싶으면 tts_model 을 edge_tts 로 바꾸면 설치 없이 납니다.
 
 3) 로그인·키
    - claude CLI: 'claude auth login' 한 번 실행

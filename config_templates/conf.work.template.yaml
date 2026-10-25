@@ -139,8 +139,11 @@ __PERSONA_PROMPT__
       provider: 'cpu'
 
   # === 음성 합성 (TTS) ===
-  # 기본값은 edge_tts. 설치할 것이 없고 바로 소리가 난다. 목소리를 따로
-  # 준비했다면 tts_model 을 'gpt_sovits_tts' 로 바꾸고 아래 블록을 채운다.
+  # 기본값은 gpt_sovits_tts. 같은 기기에서 GPT-SoVITS 추론 서버를 함께 띄워
+  # 쓰는 구성이다(scripts/start-all.sh 가 같이 올려준다). 참조 음성과
+  # prompt_text 가 서로 맞아야 품질이 나온다.
+  # GPT-SoVITS 를 아직 깔지 않았거나 소리만 먼저 확인하고 싶으면
+  # tts_model 을 'edge_tts' 로 바꾸면 설치 없이 바로 난다.
   tts_config:
     tts_model: '__TTS_MODEL__'
 

@@ -87,15 +87,16 @@ FIELDS = [
           "음성 활동 감지 (마이크 안 쓰면 null)",
           choices=["null", "silero_vad"], raw=True),
 
-    Field("tts_model", "__TTS_MODEL__", "edge_tts",
+    Field("tts_model", "__TTS_MODEL__", "gpt_sovits_tts",
           "TTS 엔진", choices=["edge_tts", "gpt_sovits_tts"]),
     Field("edge_tts_voice", "__EDGE_TTS_VOICE__", "ko-KR-SunHiNeural",
-          "edge_tts 음성 이름"),
+          "edge_tts 음성 이름 (gpt_sovits 를 쓸 수 없을 때의 대체용)"),
     Field("gpt_sovits_api_url", "__GPT_SOVITS_API_URL__",
           "http://127.0.0.1:9880/tts", "GPT-SoVITS API 주소"),
-    Field("gpt_sovits_ref_audio", "__GPT_SOVITS_REF_AUDIO__", "ref.wav",
-          "GPT-SoVITS 참조 음성 파일"),
-    Field("gpt_sovits_prompt_text", "__GPT_SOVITS_PROMPT_TEXT__", "",
+    Field("gpt_sovits_ref_audio", "__GPT_SOVITS_REF_AUDIO__", "saki.wav",
+          "GPT-SoVITS 참조 음성 파일 (GPT-SoVITS 루트 기준 상대경로)"),
+    Field("gpt_sovits_prompt_text", "__GPT_SOVITS_PROMPT_TEXT__",
+          "내부가 뻑뻑해서 그런지 조금도 움직이질 않아.",
           "참조 음성에서 말하는 내용 그대로"),
 ]
 
