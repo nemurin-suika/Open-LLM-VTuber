@@ -97,6 +97,15 @@ __PERSONA_PROMPT__
     conversation_agent_choice: 'letta_agent'
 
     agent_settings:
+      # letta_agent 를 쓰더라도 OLV 초기화 경로가 basic_memory_agent 설정 객체를
+      # 참조하므로, MCP 를 끈 기본 객체는 유지한다.
+      basic_memory_agent:
+        llm_provider: 'ollama_llm'
+        faster_first_response: True
+        segment_method: 'pysbd'
+        use_mcpp: False
+        mcp_enabled_servers: []
+
       letta_agent:
         host: '__LETTA_HOST__'
         port: __LETTA_PORT__
@@ -106,9 +115,9 @@ __PERSONA_PROMPT__
         faster_first_response: True
         segment_method: 'pysbd'
         # 실제로 돌아가는 LLM 은 letta 쪽 설정이다. letta 서버가 알아듣는
-        # handle 을 적는다. 예: 'claude_cli/claude-opus-5'
+        # handle 을 적는다. 예: 'codex_cli/gpt-5.5'
         model: '__LETTA_MODEL__'
-        # 임베딩 모델 handle. ollama 를 쓸 경우 먼저 `ollama pull bge-m3` 필요.
+        # 임베딩 모델 handle. 기본 구성은 Letta 에 등록된 ollama-local provider 를 쓴다.
         embedding: '__LETTA_EMBEDDING__'
         context_window_limit: __CONTEXT_WINDOW_LIMIT__
 

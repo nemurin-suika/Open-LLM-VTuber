@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook — VTuber 프론트로 도구 사용 승인을 중계.
+"""Claude/Codex tool approval hook — VTuber 프론트로 도구 사용 승인을 중계.
 
-letta가 띄운 `claude -p` 가 도구를 쓰려 할 때마다 이 hook이 호출된다.
+letta가 띄운 `claude -p` 또는 `codex exec` 가 도구를 쓰려 할 때마다 이 hook이 호출된다.
 
 판정 순서:
   1) SAFE_AUTO 도구(WebFetch, 스크린샷 Read)는 무조건 허용 — 프론트에 묻지 않음.
@@ -14,6 +14,7 @@ stdlib만 사용한다 (letta venv와 무관한 system python3에서도 동작).
 
 환경변수:
   VTUBER_APPROVAL_URL        기본 http://127.0.0.1:12393/tool-approval
+  VTUBER_CODEX_ALLOWLIST     Codex 실행 시 allowlist 경로
   VTUBER_CLAUDE_ALLOWLIST    기본 ~/.config/open-llm-vtuber/claude_tool_allowlist.json
   VTUBER_APPROVAL_TTL_DAYS   기본 3
   VTUBER_APPROVAL_HTTP_TIMEOUT  기본 310 (초)
@@ -29,7 +30,10 @@ import urllib.error
 
 APPROVAL_URL = os.environ.get("VTUBER_APPROVAL_URL", "http://127.0.0.1:12393/tool-approval")
 ALLOWLIST_PATH = os.path.expanduser(
-    os.environ.get("VTUBER_CLAUDE_ALLOWLIST", "~/.config/open-llm-vtuber/claude_tool_allowlist.json")
+    os.environ.get(
+        "VTUBER_CODEX_ALLOWLIST",
+        os.environ.get("VTUBER_CLAUDE_ALLOWLIST", "~/.config/open-llm-vtuber/claude_tool_allowlist.json"),
+    )
 )
 TTL_DAYS = float(os.environ.get("VTUBER_APPROVAL_TTL_DAYS", "1"))
 HTTP_TIMEOUT = float(os.environ.get("VTUBER_APPROVAL_HTTP_TIMEOUT", "310"))
@@ -142,16 +146,26 @@ def _read_last_intent(transcript_path: str = "") -> str:
 _SCREENSHOT_PREFIXES = ("/tmp/claude_screenshot", "/tmp/claude_yt_frame")
 
 
-def _emit(decision: str, reason: str = "") -> None:
-    """claude에게 PreToolUse 결정을 출력하고 종료."""
-    out = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,  # "allow" | "deny"
+def _emit(decision: str, reason: str = "", hook_event_name: str = "PreToolUse") -> None:
+    """Claude/Codex에게 hook 결정을 출력하고 종료."""
+    if hook_event_name == "PermissionRequest":
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow" if decision == "allow" else "deny"},
+            }
         }
-    }
-    if reason:
-        out["hookSpecificOutput"]["permissionDecisionReason"] = reason
+        if reason and decision != "allow":
+            out["hookSpecificOutput"]["decision"]["message"] = reason
+    else:
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,  # "allow" | "deny"
+            }
+        }
+        if reason:
+            out["hookSpecificOutput"]["permissionDecisionReason"] = reason
     print(json.dumps(out, ensure_ascii=False))
     sys.exit(0)
 
@@ -180,6 +194,23 @@ def _strip_cd(cmd: str) -> str:
     return cmd
 
 
+_COMMAND_TOOL_NAMES = {"Bash", "Shell", "shell", "exec", "exec_command", "command_execution"}
+
+
+def _is_command_tool(tool_name: str) -> bool:
+    return tool_name in _COMMAND_TOOL_NAMES
+
+
+def _command_text(tool_input: dict) -> str:
+    for key in ("command", "cmd", "shell_command"):
+        value = tool_input.get(key)
+        if isinstance(value, list):
+            return " ".join(str(v) for v in value)
+        if value is not None:
+            return str(value)
+    return ""
+
+
 def _bash_binary(real_cmd: str) -> str:
     toks = real_cmd.split()
     return toks[0] if toks else ""
@@ -194,8 +225,8 @@ def _rule_options(tool_name: str, tool_input: dict):
       - match="exact"  value=정규화된 명령   → 정확히 이 명령만
     dialog에는 id/label만 노출하고, match/value는 hook이 저장/매칭에 쓴다.
     """
-    if tool_name == "Bash":
-        raw = str(tool_input.get("command", "")).strip()
+    if _is_command_tool(tool_name):
+        raw = _command_text(tool_input).strip()
         real = _strip_cd(raw)
         binary = _bash_binary(real)
         opts = []
@@ -209,7 +240,7 @@ def _rule_options(tool_name: str, tool_input: dict):
                 {"id": "exact", "label": f"이 명령만: {shown}", "match": "exact", "value": real}
             )
         if not opts:  # 빈 명령 방어
-            opts.append({"id": "tool", "label": "Bash 도구 전체", "match": "tool", "value": "Bash"})
+            opts.append({"id": "tool", "label": f"{tool_name} 도구 전체", "match": "tool", "value": tool_name})
         return opts
     return [{"id": "tool", "label": f"{tool_name} 도구 전체", "match": "tool", "value": tool_name}]
 
@@ -220,9 +251,9 @@ def _call_matches_rule(tool_name: str, tool_input: dict, rule: dict) -> bool:
     value = rule.get("value")
     if match == "tool":
         return tool_name == value
-    if tool_name != "Bash":
+    if not _is_command_tool(tool_name):
         return False
-    real = _strip_cd(str(tool_input.get("command", "")).strip())
+    real = _strip_cd(_command_text(tool_input).strip())
     if match == "binary":
         return _bash_binary(real) == value
     if match == "exact":
@@ -315,6 +346,7 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         _emit("deny", "hook 입력 파싱 실패")
 
+    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName") or "PreToolUse"
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {}) or {}
     # Claude Code가 직접 실행될 때 transcript_path로 [알림:...] fallback 제공
@@ -322,19 +354,19 @@ def main() -> None:
 
     # 1) 안전한 기존 자동 도구
     if _is_safe_auto(tool_name, tool_input):
-        _emit("allow")
+        _emit("allow", hook_event_name=hook_event_name)
 
     options = _rule_options(tool_name, tool_input)
 
     # 2) 영구 allowlist("항상 승인", 미만료)
     if _allowlist_match(tool_name, tool_input):
-        _emit("allow", "이전에 '항상 승인'된 규칙에 해당 (TTL 내)")
+        _emit("allow", "이전에 '항상 승인'된 규칙에 해당 (TTL 내)", hook_event_name)
 
     # 3) 백엔드 중계 → 네무린 결정 대기
     try:
         result = _ask_backend(tool_name, tool_input, options, transcript_path)
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        _emit("deny", f"승인 서버 응답 없음({type(e).__name__}) — 안전상 거부")
+        _emit("deny", f"승인 서버 응답 없음({type(e).__name__}) — 안전상 거부", hook_event_name)
 
     decision = result.get("decision", "deny")
     if decision == "allow":
@@ -343,10 +375,10 @@ def main() -> None:
             chosen_id = result.get("rule_option")
             chosen = next((o for o in options if o["id"] == chosen_id), options[0])
             _allowlist_add(chosen)
-        _emit("allow")
+        _emit("allow", hook_event_name=hook_event_name)
     else:
         reason = result.get("reason") or "네무린이 이 도구 사용을 거부했습니다"
-        _emit("deny", reason)
+        _emit("deny", reason, hook_event_name)
 
 
 if __name__ == "__main__":

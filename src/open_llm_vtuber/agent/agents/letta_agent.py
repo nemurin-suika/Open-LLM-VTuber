@@ -1610,6 +1610,9 @@ class LettaAgent(AgentInterface):
         _yielded = 0
         last_reasoning = ""       # 직전 reasoning_message 누적 버퍼
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
+        _pending_speech = ""
+        _had_tool_call = False
+        _stream_failed = False
         _session_gist = ""        # [세션요약] 태그로 받은 현재 세션 한 줄 요약 (마지막 것 사용)
         _gist_open = False        # [세션요약] 가 열린 채 토큰 경계를 넘어갔는지
         _gist_carry = ""          # 청크 경계에서 쪼개진 세션요약 태그 조각 보류분
@@ -1709,11 +1712,13 @@ class LettaAgent(AgentInterface):
         _stream_queue: asyncio.Queue = asyncio.Queue()
 
         async def _feed_stream() -> None:
+            nonlocal _stream_failed
             try:
                 async for _t in stream:
                     await _stream_queue.put(_t)
             except Exception as _fe:
-                logger.debug(f"[Letta] _feed_stream 오류: {_fe}")
+                _stream_failed = True
+                logger.error(f"[Letta] _feed_stream 오류: {_fe}")
             finally:
                 await _stream_queue.put(None)  # 종료 sentinel
 
@@ -1852,10 +1857,18 @@ class LettaAgent(AgentInterface):
                         _save_reasoning(last_reasoning, self.conversation_id)
                     if not text:
                         continue
+                    _pending_speech += text
+                    continue
                 elif token.message_type == "letta_error":
                     logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
+                    _stream_failed = True
                     continue
                 elif token.message_type == "tool_call_message":
+                    if _pending_speech and _pending_speech not in _found_notifies:
+                        yield {"type": "progress_update", "text": _pending_speech, "timestamp": _time.time()}
+                        _found_notifies.add(_pending_speech)
+                    _pending_speech = ""
+                    _had_tool_call = True
                     _tc = getattr(token, "tool_call", None)
                     tool_name = getattr(_tc, "name", None) or "unknown"
                     tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
@@ -1871,7 +1884,6 @@ class LettaAgent(AgentInterface):
                     # 삼켜버리는 사고 방지(버퍼가 비워지므로 닫는 태그를 영원히 못 찾음)
                     _gist_open = False
                     _gist_carry = ""
-                    _found_notifies = set()
                     _found_images = set()
                     _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
                     continue
@@ -1883,14 +1895,29 @@ class LettaAgent(AgentInterface):
                     # 툴 반환 후 다시 응답 생성 단계로 전환
                     yield {"type": "agent_status", "status": "active", "detail": "생각 중", "timestamp": _time.time()}
                     continue
-                elif token.message_type in ("stop_reason", "usage_statistics", "ping"):
+                elif token.message_type == "stop_reason":
+                    _reason = getattr(token, "stop_reason", None)
+                    _reason = getattr(_reason, "value", _reason)
+                    if _reason not in (None, "end_turn"):
+                        logger.warning(f"[Letta] 미완료 종료: {_reason}")
+                        _stream_failed = True
+                    continue
+                elif token.message_type in ("usage_statistics", "ping"):
                     continue
                 else:
                     logger.debug(f"[Letta] 알 수 없는 토큰 타입 무시: {token.message_type}")
                     continue
 
-                _yielded += 1
-                yield text
+            if not self._abort_flag:
+                if _stream_failed:
+                    _yielded += 1
+                    yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
+                elif _pending_speech:
+                    _yielded += 1
+                    yield _pending_speech
+                elif _had_tool_call:
+                    _yielded += 1
+                    yield "작업이 완료되기 전에 응답이 중단됐습니다. 진행 내역을 확인해주세요."
 
             # 스트림 종료 후 남은 ADB 스크린샷 마지막 flush
             while not _image_queue.empty():

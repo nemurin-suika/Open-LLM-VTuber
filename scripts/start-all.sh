@@ -29,8 +29,9 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(dirname "$REPO_ROOT")"
+MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME/ai}"
 LETTA_DIR="${LETTA_REPO_DIR:-$BASE_DIR/letta}"
-LOG_DIR="$HOME/.mizuki/logs"
+LOG_DIR="$MIZUKI_AI_HOME/.mizuki/logs"
 LETTA_LOG="$LOG_DIR/letta.log"
 LETTA_PID="$LOG_DIR/letta.pid"
 

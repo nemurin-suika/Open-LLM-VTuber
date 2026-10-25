@@ -24,7 +24,7 @@
 # 안 하는 일 (일부러):
 #   - launchd 등록. 상주 운영 설정은 환경마다 다르므로 손대지 않는다.
 #   - Live2D 모델·TTS 참조 음성 설치. 라이선스 때문에 저장소에 없다.
-#   - API 키 입력. ~/.secrets 템플릿만 만들어 둔다.
+#   - API 키 입력. 필요한 값은 launchd env 또는 shell env 로 직접 넣는다.
 #
 # 옵션:
 #   --dir <경로>   저장소를 모아 둘 상위 디렉토리 (기본: 이 저장소의 부모)
@@ -59,6 +59,7 @@ TTS_BRANCH="nemurin"
 TTS_DIRNAME="GPT-SoVITS-v3lora-20250228"
 
 BREW_PACKAGES=(postgresql@17 redis node ollama)
+MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME/ai}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -159,10 +160,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 info "OK   uv ($(uv --version 2>/dev/null))"
 
-if command -v claude >/dev/null 2>&1; then
-    info "OK   claude CLI"
+if command -v codex >/dev/null 2>&1; then
+    info "OK   codex CLI"
 else
-    warn "claude CLI 가 없습니다. letta 의 claude_cli 모델을 쓰려면 Claude Code CLI 설치와 로그인이 필요합니다."
+    warn "codex CLI 가 없습니다. letta 의 codex_cli 모델을 쓰려면 Codex CLI 설치와 로그인이 필요합니다."
 fi
 
 # ── 2. 저장소 클론 ────────────────────────────────────────────────────────────
@@ -229,26 +230,14 @@ else
     warn "$LETTA_RUN 이 없습니다. letta 클론을 확인하세요."
 fi
 
-# ── 5. 비밀값 파일 ────────────────────────────────────────────────────────────
-step "비밀값 파일 (~/.secrets)"
-# letta/run.sh 가 첫 줄에서 source ~/.secrets 를 한다. 없으면 기동이 멈춘다.
-if [ -f "$HOME/.secrets" ]; then
-    info "이미 있음 — 손대지 않습니다."
-else
-    cat > "$HOME/.secrets" <<'SECRETS'
-# letta/run.sh 가 읽는 비밀값 파일. 이 파일은 저장소에 넣지 않는다.
-# 쓰지 않는 항목은 빈 값으로 두어도 된다.
-
-# 임베딩용 Gemini API 키 (여러 개 넣으면 429 때 차례로 넘어간다)
-GEMINI_KEYS=()
-SECRETS
-    chmod 600 "$HOME/.secrets"
-    info "템플릿 생성: ~/.secrets (필요한 키를 채우세요)"
-fi
+# ── 5. 런타임 홈 ──────────────────────────────────────────────────────────────
+step "런타임 홈 (${MIZUKI_AI_HOME})"
+mkdir -p "$MIZUKI_AI_HOME"
+info "Letta runtime HOME: $MIZUKI_AI_HOME"
 
 # ── 6. PostgreSQL 데이터 디렉토리 ─────────────────────────────────────────────
 step "PostgreSQL 데이터 디렉토리"
-PG_DATA="${MIZUKI_PG_DATA:-$HOME/.mizuki/pgdata}"
+PG_DATA="${MIZUKI_PG_DATA:-$MIZUKI_AI_HOME/.mizuki/pgdata}"
 PG_BIN="/opt/homebrew/opt/postgresql@17/bin"
 if [ -f "$PG_DATA/PG_VERSION" ]; then
     info "이미 초기화됨: $PG_DATA"
@@ -360,8 +349,9 @@ cat <<GUIDE
    소리만 먼저 확인하고 싶으면 tts_model 을 edge_tts 로 바꾸면 설치 없이 납니다.
 
 3) 로그인·키
-   - claude CLI: 'claude auth login' 한 번 실행
-   - ~/.secrets: 필요한 API 키 채우기
+   - Codex CLI: 'codex login' 한 번 실행
+   - 기본 구성은 ollama-local/bge-m3 임베딩이라 별도 secrets 파일이 필요 없습니다.
+     Gemini 등을 쓰려면 GEMINI_API_KEY 또는 GEMINI_API_KEYS 를 환경변수로 넘기세요.
 
 4) 페르소나
    conf.yaml 의 persona_prompt 가 자리표시 문구라면 직접 채우세요.

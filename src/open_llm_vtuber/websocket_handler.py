@@ -87,6 +87,33 @@ class WSMessage(TypedDict, total=False):
     display_text: Optional[dict]
 
 
+def _filter_images_for_screen_capture_setting(
+    images: Optional[List[Dict[str, Any]]],
+    screen_capture_enabled: bool,
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep explicit uploads while honoring the screen-capture kill switch."""
+    if not images:
+        return None
+    if screen_capture_enabled:
+        return images
+
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    for image in images:
+        source = str(image.get("source", "")).lower() if isinstance(image, dict) else ""
+        if source == "upload":
+            kept.append(image)
+        else:
+            dropped += 1
+
+    if dropped or kept:
+        logger.info(
+            "[ImageInput] enable_screen_capture=false: "
+            f"자동 캡처 {dropped}개 차단, 직접 첨부 {len(kept)}개 전달"
+        )
+    return kept or None
+
+
 class WebSocketHandler:
     """Handles WebSocket connections and message routing"""
 
@@ -851,6 +878,7 @@ class WebSocketHandler:
 
                 captured: list[str] = []
                 _seen_notify_ts: set = set()
+                _sent_progress_texts: set = set()
 
                 # [알림: ...] 중간 진행 알림을 캡처 버퍼 우회해 실시간 전송
                 import os as _os_notify
@@ -872,14 +900,18 @@ class WebSocketHandler:
                                             _ts = _entry.get("ts")
                                             if _ts and _ts not in _seen_notify_ts:
                                                 _seen_notify_ts.add(_ts)
+                                                _text = _entry.get("text", "")
+                                                if not _text or _text in _sent_progress_texts:
+                                                    continue
+                                                _sent_progress_texts.add(_text)
                                                 # letta 에는 알림이 저장되지 않으므로
                                                 # 세션 보조 로그에 남겨 복원에 쓴다.
                                                 session_log.log_progress(
-                                                    sid, _entry.get("text", ""), _ts
+                                                    sid, _text, _ts
                                                 )
                                                 await ws.send_text(json.dumps({
                                                     "type": "progress_update",
-                                                    "text": _entry.get("text", ""),
+                                                    "text": _text,
                                                     "timestamp": _ts,
                                                     "session_id": sid,
                                                 }))
@@ -892,11 +924,17 @@ class WebSocketHandler:
                 poll_task = asyncio.create_task(_poll_and_send_notify())
 
                 async def _cap_send(raw: str) -> None:
-                    # progress_update는 poll_task가 실시간 전송 → captured 제외
                     # image_display는 오디오 순서와 무관하므로 즉시 전송 → captured 제외
                     try:
-                        _msg_type = json.loads(raw).get("type")
+                        _payload = json.loads(raw)
+                        _msg_type = _payload.get("type")
                         if _msg_type == "progress_update":
+                            _text = _payload.get("text", "")
+                            if ws and _text and _text not in _sent_progress_texts:
+                                _sent_progress_texts.add(_text)
+                                _ts = _payload.get("timestamp") or time.time()
+                                session_log.log_progress(sid, _text, _ts)
+                                await ws.send_text(raw)
                             return
                         if _msg_type == "image_display":
                             if ws:
@@ -2028,14 +2066,15 @@ class WebSocketHandler:
             if sys_audio:
                 metadata["system_audio"] = sys_audio
 
-        # Drop screenshot images when enable_screen_capture is False
+        # Drop automatic screenshot/camera images when enable_screen_capture is False.
+        # Explicit chat uploads use source="upload" and should still reach the agent.
         screen_capture_enabled = (
             context.system_config.enable_screen_capture
             if context and hasattr(context, "system_config")
             else True
         )
         if not screen_capture_enabled:
-            images = None
+            images = _filter_images_for_screen_capture_setting(images, screen_capture_enabled)
             # 시스템 오디오도 같은 토글로 묶어 비활성화 가능 (별도 토글 추가 시 분리)
             metadata.pop("system_audio", None)
 

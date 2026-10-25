@@ -19,7 +19,7 @@ cd ~/develop/Open-LLM-VTuber-v1.2.1-en && ./scripts/bootstrap.sh
 ```
 
 그 뒤 손으로 할 일은 네 가지다. **Live2D 모델 폴더 복사**,
-**목소리 참조 음성 복사**, **페르소나 작성**, **claude CLI 로그인**.
+**목소리 참조 음성 복사**, **페르소나 작성**, **Codex CLI 로그인**.
 자세한 건 아래.
 
 `bootstrap.sh` 는 GPT-SoVITS 모델까지 받으므로 처음 한 번은 삼십 분 이상
@@ -69,12 +69,12 @@ GPT-SoVITS 는 파이썬 3.9 전용 환경을 저장소 안의 `.venv` 에 따�
 ./scripts/bootstrap.sh --skip-tts   # 목소리는 나중에
 ```
 
-1. 필요한 도구 점검 — `postgresql@17`, `redis`, `node`, `ollama`, `uv`, `claude`
+1. 필요한 도구 점검 — `postgresql@17`, `redis`, `node`, `ollama`, `uv`, `codex`
 2. letta / 프론트엔드 / GPT-SoVITS 저장소 클론
 3. `frontend` 심볼릭 링크 연결
 4. `letta/run.sh` 의 절대경로·LAN 주소를 이 맥 기준으로 치환
-5. `~/.secrets` 템플릿 생성 (없을 때만)
-6. PostgreSQL 데이터 디렉토리 `initdb` (`~/.mizuki/pgdata`)
+5. 런타임 홈 `~/ai` 생성
+6. PostgreSQL 데이터 디렉토리 `initdb` (`~/ai/.mizuki/pgdata`)
 7. `uv sync` (백엔드·letta), `npm install` (프론트엔드)
 8. GPT-SoVITS 설치 — `GPT-SoVITS/scripts/setup-mac.sh` 를 불러서 수행
 9. `ollama pull bge-m3`
@@ -136,8 +136,8 @@ python3 scripts/make_conf.py --set port=12394 --set tts_model=gpt_sovits_tts
 | `character_name` / `human_name` | `미즈키` / `사용자` | 표시 이름 |
 | `live2d_model_name` | `MIA` | `model_dict.json` 의 `name` 과 같아야 함 |
 | `letta_host` / `letta_port` | `localhost` / `8283` | letta 서버 |
-| `letta_model` | `claude_cli/claude-opus-5` | letta 쪽 LLM handle |
-| `letta_embedding` | `ollama/bge-m3:latest` | 임베딩 handle |
+| `letta_model` | `codex_cli/gpt-6-sol` | letta 쪽 LLM handle |
+| `letta_embedding` | `ollama-local/bge-m3:latest` | 임베딩 handle |
 | `context_window_limit` | `100000` | 컨텍스트 상한 |
 | `asr_model` | `null` | 마이크를 쓰면 `sherpa_onnx_asr` |
 | `vad_model` | `null` | 마이크를 쓰면 `silero_vad` |
@@ -184,7 +184,7 @@ python3 scripts/make_conf.py --set port=12394 --set tts_model=gpt_sovits_tts
 참조 음성과 대사는 `conf.yaml` 값을 그대로 환경 변수로 넘기므로 설정 한 곳만
 고치면 양쪽이 같이 따라온다. 모델을 올리는 데 시간이 걸려서 백엔드보다 먼저
 띄우고 포트가 열릴 때까지 기다리지만, 늦게 떠도 대화 자체는 된다(그 몇 마디만
-소리 없이 지나간다). 로그는 `~/.mizuki/logs/gpt-sovits.log`.
+소리 없이 지나간다). 로그는 `~/ai/.mizuki/logs/gpt-sovits.log`.
 
 첫 기동에서 `frontend/dist/web` 이 없으면 자동으로 빌드하고 띄운다.
 
@@ -232,9 +232,9 @@ ffmpeg -i saki.mp3 -c:a pcm_s16le ~/develop/GPT-SoVITS-v3lora-20250228/saki.wav
 
 ### 5-3. 로그인과 키
 
-- `claude auth login` — letta 가 `claude_cli` 모델을 쓸 때 필요하다.
-- `~/.secrets` — `letta/run.sh` 가 첫 줄에서 읽는다. 없으면 기동이 멈춘다.
-  bootstrap 이 빈 템플릿을 만들어 두므로 필요한 키만 채운다.
+- `codex login` — letta 가 `codex_cli` 모델을 쓸 때 필요하다.
+- 기본 구성은 `ollama-local/bge-m3` 임베딩이라 secrets 파일이 필요 없다. Gemini 등을
+  쓰려면 `GEMINI_API_KEY` 또는 `GEMINI_API_KEYS` 를 환경변수로 넘긴다.
 
 ### 5-4. 페르소나
 
@@ -256,10 +256,10 @@ python3 scripts/make_conf.py --persona ~/persona.txt --force
 | 표정이 안 바뀜 | `model_dict.json` 의 `emotionMap`, 모델의 `Expressions` 등록 여부 |
 | 입이 안 움직임 | model3.json 의 `Groups` 에 `LipSync` 가 있고 `Ids` 가 비어 있지 않은지 |
 | 말투·기억이 예전 그대로 | letta 보다 백엔드가 먼저 떴을 때 생긴다. `--stop` 후 `start-all.sh` 로 다시 |
-| letta 가 안 뜸 | `tail -n 100 ~/.mizuki/logs/letta.log`, postgres/redis 기동 여부 |
+| letta 가 안 뜸 | `tail -n 100 ~/ai/.mizuki/logs/letta.log`, postgres/redis 기동 여부 |
 | postgres 가 바로 죽음 | 로케일. `LANG`/`LC_ALL` 이 `en_US.UTF-8` 인지 |
 | 포트 점유 | `./scripts/start-all.sh --status` → `--stop` |
-| 소리가 안 남 | `--status` 로 9880 확인 → `tail -n 100 ~/.mizuki/logs/gpt-sovits.log` |
+| 소리가 안 남 | `--status` 로 9880 확인 → `tail -n 100 ~/ai/.mizuki/logs/gpt-sovits.log` |
 | 목소리 서버가 바로 죽음 | `tts_infer_mac.yaml` 을 쓰는지. 기본 `tts_infer.yaml` 은 `device: cuda` 라 맥에서 터진다 |
 | 참조 음성을 못 찾음 | `conf.yaml` 의 `ref_audio_path` 가 GPT-SoVITS 저장소 루트 기준 상대경로인지 |
 | 발음이 뭉개짐 | `prompt_text` 가 참조 음성의 실제 대사와 같은지 |

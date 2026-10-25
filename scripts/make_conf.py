@@ -73,9 +73,9 @@ FIELDS = [
 
     Field("letta_host", "__LETTA_HOST__", "localhost", "letta 서버 주소"),
     Field("letta_port", "__LETTA_PORT__", "8283", "letta 서버 포트", raw=True),
-    Field("letta_model", "__LETTA_MODEL__", "claude_cli/claude-opus-5",
+    Field("letta_model", "__LETTA_MODEL__", "codex_cli/gpt-6-sol",
           "letta LLM handle"),
-    Field("letta_embedding", "__LETTA_EMBEDDING__", "ollama/bge-m3:latest",
+    Field("letta_embedding", "__LETTA_EMBEDDING__", "ollama-local/bge-m3:latest",
           "letta 임베딩 handle"),
     Field("context_window_limit", "__CONTEXT_WINDOW_LIMIT__", "100000",
           "컨텍스트 윈도 상한", raw=True),
