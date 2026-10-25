@@ -262,6 +262,46 @@ _MIZUKI_IMAGE_TAG_RE = re.compile(
 #   [세션요약]지금 세션에서 무슨 얘기를 하고 있는지 한 문장[/세션요약]
 # 백엔드가 감지하면 활성 세션의 요약으로 저장하고 TTS/표시 텍스트에서는 제거한다.
 _SESSION_GIST_TAG_RE = re.compile(r'\[세션요약\](.+?)\[/세션요약\]', re.DOTALL)
+_SESSION_GIST_OPEN = "[세션요약]"
+_SESSION_GIST_CLOSE = "[/세션요약]"
+# 닫는 태그를 빼먹었을 때의 폴백 — 여는 태그부터 그 줄 끝까지를 요약으로 본다.
+_SESSION_GIST_OPEN_ONLY_RE = re.compile(r'\[세션요약\][^\n]*')
+
+
+def _gist_tag_partial_suffix_len(text: str) -> int:
+    """text 꼬리가 세션요약 태그 문자열의 앞부분과 일치하면 그 길이를 반환.
+
+    스트리밍 청크 경계에서 '[세션요'처럼 태그 이름 중간이 잘리면 태그 감지가
+    실패해 요약문이 TTS/표시 텍스트로 새어나간다. 잘린 꼬리를 다음 청크까지
+    보류했다가 합쳐서 판정하기 위한 길이 계산.
+    """
+    if not text:
+        return 0
+    max_len = max(len(_SESSION_GIST_OPEN), len(_SESSION_GIST_CLOSE)) - 1
+    for n in range(min(max_len, len(text)), 0, -1):
+        tail = text[-n:]
+        if _SESSION_GIST_OPEN.startswith(tail) or _SESSION_GIST_CLOSE.startswith(tail):
+            return n
+    return 0
+
+
+def _extract_session_gist(buffer: str, current: str = "") -> str:
+    """누적 버퍼에서 세션 한 줄 요약을 뽑는다(마지막 것 채택).
+
+    짝이 맞는 태그를 우선하고, 마지막 여는 태그가 닫히지 않았으면 그 줄 끝까지를
+    요약으로 받아들인다. 못 찾으면 기존 값(current)을 그대로 돌려준다.
+    """
+    gist = current
+    for _gm in _SESSION_GIST_TAG_RE.finditer(buffer):
+        _g = _gm.group(1).strip()
+        if _g:
+            gist = _g
+    _last_open = buffer.rfind(_SESSION_GIST_OPEN)
+    if _last_open != -1 and _SESSION_GIST_CLOSE not in buffer[_last_open:]:
+        _tail = buffer[_last_open + len(_SESSION_GIST_OPEN):].split("\n", 1)[0].strip()
+        if _tail:
+            gist = _tail
+    return gist
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -1014,6 +1054,8 @@ def _clean_assistant_history_text(raw: Optional[str]) -> Optional[str]:
     text = re.sub(r"\[이미지\].*?\[/이미지\]", "", text, flags=re.DOTALL)
     text = _MIZUKI_IMAGE_TAG_RE.sub("", text)
     text = _SESSION_GIST_TAG_RE.sub("", text)
+    # 닫는 태그가 없는 경우에도 요약문이 채팅창에 남지 않게 줄 끝까지 제거
+    text = _SESSION_GIST_OPEN_ONLY_RE.sub("", text)
     text = _LIVE2D_TAG_RE.sub("", text)
     text = text.replace("[무음시작]", "").replace("[무음끝]", "")
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -1570,6 +1612,7 @@ class LettaAgent(AgentInterface):
         _assistant_buffer = ""    # assistant_message 누적 버퍼 (토큰 경계 넘어 [알림:] 감지용)
         _session_gist = ""        # [세션요약] 태그로 받은 현재 세션 한 줄 요약 (마지막 것 사용)
         _gist_open = False        # [세션요약] 가 열린 채 토큰 경계를 넘어갔는지
+        _gist_carry = ""          # 청크 경계에서 쪼개진 세션요약 태그 조각 보류분
         _found_notifies: set = set()  # 이미 yield한 [알림:] 내용 — 중복 방지
         _found_images: set = set()    # 이미 yield한 [이미지] 파일 경로 — 중복 방지
 
@@ -1734,6 +1777,10 @@ class LettaAgent(AgentInterface):
                         text = content
                     # 누적 버퍼에 추가 — 토큰 경계를 넘어 [알림: ...] 감지
                     _assistant_buffer += text
+                    # 이전 청크 끝에서 보류한 태그 조각을 복원 (버퍼에는 이미 반영돼 있음)
+                    if _gist_carry:
+                        text = _gist_carry + text
+                        _gist_carry = ""
                     _notify_texts: list[str] = []
                     for _m in re.finditer(r'\[알림:\s*(.*?)\]', _assistant_buffer, re.DOTALL):
                         _notify = _m.group(1).strip()
@@ -1768,26 +1815,33 @@ class LettaAgent(AgentInterface):
                             else:
                                 yield _img_payload
                     # [세션요약]...[/세션요약] 감지 → 현재 세션 한 줄 요약으로 보관(마지막 것 채택)
-                    for _gm in _SESSION_GIST_TAG_RE.finditer(_assistant_buffer):
-                        _g = _gm.group(1).strip()
-                        if _g:
-                            _session_gist = _g
+                    # 닫는 태그를 빼먹어도 줄 끝까지를 요약으로 받아들인다
+                    _session_gist = _extract_session_gist(_assistant_buffer, _session_gist)
                     # [알림: ...] 및 [이미지]path[/이미지] 태그를 TTS/표시 텍스트에서 제거
                     text = re.sub(r'\[알림:\s*.*?\]', '', text, flags=re.DOTALL)
                     text = _MIZUKI_IMAGE_TAG_RE.sub('', text)
                     # 세션요약 태그는 토큰 경계를 넘어가도 통째로 음성/표시에서 빠지게 상태로 처리
                     if _gist_open:
-                        _close = text.find('[/세션요약]')
+                        _close = text.find(_SESSION_GIST_CLOSE)
                         if _close == -1:
+                            # 닫는 태그가 아직 안 왔다 — 꼬리에 쪼개진 조각이 있으면 보류
+                            _n = _gist_tag_partial_suffix_len(text)
+                            _gist_carry = text[-_n:] if _n else ""
                             text = ''
                         else:
-                            text = text[_close + len('[/세션요약]'):]
+                            text = text[_close + len(_SESSION_GIST_CLOSE):]
                             _gist_open = False
                     text = _SESSION_GIST_TAG_RE.sub('', text)
-                    _open_at = text.rfind('[세션요약]')
-                    if _open_at != -1 and '[/세션요약]' not in text[_open_at:]:
+                    _open_at = text.rfind(_SESSION_GIST_OPEN)
+                    if _open_at != -1 and _SESSION_GIST_CLOSE not in text[_open_at:]:
                         text = text[:_open_at]
                         _gist_open = True
+                    elif not _gist_open:
+                        # 태그가 청크 경계에서 쪼개진 경우 꼬리를 보류해 다음 청크와 합쳐 판정
+                        _n = _gist_tag_partial_suffix_len(text)
+                        if _n:
+                            _gist_carry = text[-_n:]
+                            text = text[:-_n]
                     text = text.strip()
                     # last_reasoning이 비어있으면 [알림:...] 내용으로만 채움.
                     # 우선순위: reasoning_message > [알림:...] 내용
@@ -1813,6 +1867,10 @@ class LettaAgent(AgentInterface):
                     # 다음 step을 위해 초기화
                     last_reasoning = ""
                     _assistant_buffer = ""
+                    # 요약 태그 상태도 초기화 — 짝 안 맞는 태그가 다음 step 발화를 통째로
+                    # 삼켜버리는 사고 방지(버퍼가 비워지므로 닫는 태그를 영원히 못 찾음)
+                    _gist_open = False
+                    _gist_carry = ""
                     _found_notifies = set()
                     _found_images = set()
                     _notify_file_offset = 0  # 다음 step의 알림 파일도 처음부터
