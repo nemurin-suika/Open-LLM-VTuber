@@ -87,6 +87,26 @@ jq '.Groups | map(.Name)' "$MODEL"
 
 모델 폴더에 `*.exp3.json` 이 굴러다녀도 `FileReferences.Expressions` 배열에 들어있지 않으면 SDK 가 로드하지 않는다. 폴더 목록이 아니라 **반드시 model3.json 안의 배열**을 기준으로 삼을 것.
 
+### VTube Studio 배포 모델을 붙일 때 (중요)
+
+BOOTH 등에서 파는 VTS 용 모델은 표정을 `.vtube.json` 의 Hotkeys 로 관리하므로, **model3.json 에는 `Expressions` 키가 아예 없고 `LipSync` 의 `Ids` 가 빈 배열인 경우가 많다.** 그대로 쓰면 표정도 안 되고 입도 안 움직인다. 아래 순서로 직접 채워야 한다.
+
+1. **표정 파일의 의도를 파악한다.** 파일명만으로는 알기 어려우므로 `.vtube.json` 의 `Hotkeys` 를 본다. `Name` 이 제작자가 붙인 설명이고 `File` 이 대응하는 exp3 다.
+   ```sh
+   jq '.Hotkeys | map({name: .Name, file: .File, action: .Action})' 모델.vtube.json
+   ```
+2. **감정용과 소품/포즈용을 가른다.** 모자 벗기, 가방 내리기, 팔 올리기 같은 토글은 감정이 아니므로 `Expressions` 에 등록은 하되 `emotionMap` 에는 넣지 않는다.
+3. **중립 표정을 만든다.** VTS 모델은 "전체 해제" 핫키로 원상복귀하므로 중립 exp3 가 없다. `Parameters` 가 빈 배열인 `neutral.exp3.json` 을 만들어 등록하고 `defaultEmotion` 으로 지정한다.
+4. **LipSync 를 채운다.** moc3 에서 입 파라미터 ID 를 찾아 `Groups` 의 `LipSync.Ids` 에 넣는다. 보통 `ParamMouthOpenY` 다.
+   ```sh
+   strings -n 3 모델.moc3 | grep -iE "mouth|eye|brow" | sort -u
+   ```
+5. `EyeBlink` 그룹도 비어 있으면 `ParamEyeLOpen` / `ParamEyeROpen` 을 넣는다.
+
+표정 Blend 가 `Add` 여도 상관없다. SDK 는 표정을 교체 적용하므로 누적되지 않는다.
+
+> 실제 적용 사례: `live2d-models/MIA` (VTS 배포 모델). Expressions 11개를 신규 등록하고 `neutral.exp3.json` 을 추가, `LipSync.Ids` 에 `ParamMouthOpenY` 를 채워 동작시켰다.
+
 ---
 
 ## 4. model_dict.json 엔트리 작성

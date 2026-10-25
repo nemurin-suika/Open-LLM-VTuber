@@ -41,5 +41,22 @@
       "부끄러움": 0,
       "혼란함": 7
     }
+  },
+  {
+    "name": "MIA",
+    "url": "/live2d-models/MIA/MIA.model3.json",
+    "kScale": 0.7,
+    "initialXshift": 0,
+    "initialYshift": 0,
+    "defaultEmotion": "중립",
+    "emotionMap": {
+      "중립": "중립",
+      "즐거움": "즐거움",
+      "신남": "신남",
+      "놀람": "놀람",
+      "슬픔": "슬픔",
+      "화남": "화남",
+      "뚱함": "뚱함"
+    }
   }
 ]
