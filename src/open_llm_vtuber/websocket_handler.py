@@ -106,6 +106,9 @@ class WebSocketHandler:
         # 세션별로 돌고 있는 LLM+TTS capture task (인터럽트 시 cancel 대상).
         # 세션 하나가 작업 중일 때 다른 세션에서 말을 걸어도 서로 안 끊긴다.
         self._capture_tasks: Dict[str, asyncio.Task] = {}
+        # 세션별 턴 시작 시각 (epoch). /session-status 에서 "얼마나 오래 돌고 있는지"를
+        # 알려주기 위한 용도. 재기동 전에 남의 작업을 끊지 않으려고 쓴다(TODO26).
+        self._turn_started: Dict[str, float] = {}
         # 비활성 세션에서 완성된 발화를 모아두는 버퍼. 값은 턴 단위 메시지 묶음 목록.
         # 사용자가 그 세션으로 넘어가면 꺼내서 재생한다(마지막 턴만 음성).
         self._session_buffers: Dict[str, List[List[str]]] = {}
@@ -230,6 +233,54 @@ class WebSocketHandler:
         """그 세션이 지금 턴을 돌고 있는지."""
         task = self._capture_tasks.get(session_id)
         return task is not None and not task.done()
+
+    # ── 재기동 충돌 방지용 상태 조회 (TODO26) ────────────────────────────
+
+    def session_status(self) -> dict:
+        """지금 돌고 있는 세션이 있는지 한눈에 보여주는 스냅샷.
+
+        미즈키가 letta/백엔드를 재기동하기 전에 이걸 먼저 읽고, 다른 세션이
+        작업 중이면 멈춘다. 재기동은 돌고 있던 턴을 통째로 날리기 때문에
+        반만 고쳐진 파일이 남을 수 있다.
+
+        백엔드가 죽어 있으면 조회 자체가 실패하는데, 그건 돌고 있는 턴도
+        없다는 뜻이라 그대로 재기동해도 안전하다.
+        """
+        now = time.time()
+        agent = self._any_agent()
+        names = dict(getattr(agent, "_session_names", {}) or {})
+        active = self._active_session_id()
+
+        known = set(names) | set(self._capture_tasks) | set(self._pending_inputs)
+        known.add(active)
+
+        sessions = []
+        for sid in sorted(known):
+            busy = self._session_busy(sid)
+            started = self._turn_started.get(sid)
+            sessions.append(
+                {
+                    "id": sid,
+                    "name": (names.get(sid) or "").strip(),
+                    "busy": busy,
+                    "active": sid == active,
+                    "elapsed_sec": (
+                        round(now - started, 1) if busy and started else None
+                    ),
+                    "queued": len(self._pending_inputs.get(sid) or []),
+                    "unread_turns": len(self._session_buffers.get(sid) or []),
+                }
+            )
+
+        busy_sessions = [s for s in sessions if s["busy"]]
+        return {
+            "busy": bool(busy_sessions),
+            "busy_count": len(busy_sessions),
+            "active_session_id": active,
+            "sessions": sessions,
+            "safe_to_restart": not busy_sessions,
+            "checked_at": now,
+        }
 
     @staticmethod
     def _queue_preview(item: dict) -> str:
@@ -765,6 +816,7 @@ class WebSocketHandler:
             bind_session(sid)
             # 세션별 task 추적 — 인터럽트 시 cancel 대상
             self._capture_tasks[sid] = asyncio.current_task()
+            self._turn_started[sid] = time.time()
             user_input_preview = str(item.get("user_input", ""))[:40]
             logger.debug(f"[TTS-DBG] capture start: {user_input_preview!r}")
             try:

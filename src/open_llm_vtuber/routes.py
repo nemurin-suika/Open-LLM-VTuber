@@ -85,6 +85,34 @@ def init_tool_approval_route(ws_handler: WebSocketHandler) -> APIRouter:
     return router
 
 
+def init_session_status_route(ws_handler: WebSocketHandler) -> APIRouter:
+    """세션 작업 상태 조회 엔드포인트 (TODO26).
+
+    미즈키가 letta/백엔드를 재기동하기 전에 `curl -s -m 5
+    http://127.0.0.1:12393/session-status` 로 먼저 물어보고, 다른 세션이
+    턴을 돌고 있으면 재기동을 멈추기 위한 창구다.
+
+    재기동은 돌고 있던 턴을 통째로 끊어버리기 때문에, 파일을 반만 고친
+    상태로 남을 수 있다. 백엔드가 이미 죽어 있으면 이 요청도 실패하는데,
+    그건 돌고 있는 턴도 없다는 뜻이라 그냥 재기동해도 된다.
+    """
+
+    router = APIRouter()
+
+    @router.get("/session-status")
+    async def session_status():
+        try:
+            return JSONResponse(ws_handler.session_status())
+        except Exception as e:
+            logger.error(f"[session-status] 상태 조회 실패: {e}")
+            # 판단 근거가 없을 땐 "안전하지 않다"로 답해서 재기동을 멈추게 한다.
+            return JSONResponse(
+                {"error": str(e), "safe_to_restart": False}, status_code=500
+            )
+
+    return router
+
+
 def init_proxy_route(server_url: str) -> APIRouter:
     """
     Create and return API routes for handling proxy connections.

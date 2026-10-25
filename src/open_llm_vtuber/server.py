@@ -22,6 +22,7 @@ from .routes import (
     init_webtool_routes,
     init_proxy_route,
     init_tool_approval_route,
+    init_session_status_route,
 )
 from .service_context import ServiceContext
 from .config_manager.utils import Config
@@ -122,6 +123,8 @@ class WebSocketServer:
         )
         # Claude 도구 승인 중계 (hook → 프론트). catch-all 마운트보다 먼저 등록.
         self.app.include_router(init_tool_approval_route(ws_handler=ws_handler))
+        # 재기동 전에 "다른 세션이 작업 중인가"를 물어볼 창구 (TODO26)
+        self.app.include_router(init_session_status_route(ws_handler=ws_handler))
 
         # Initialize and include proxy routes if proxy is enabled
         system_config = config.system_config
