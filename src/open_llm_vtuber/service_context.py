@@ -49,7 +49,8 @@ class ServiceContext:
         self.character_config: CharacterConfig = None
 
         self.live2d_model: Live2dModel = None
-        self.asr_engine: ASRInterface = None
+        # asr_engine can be none if ASR is disabled
+        self.asr_engine: ASRInterface | None = None
         self.tts_engine: TTSInterface = None
         self.agent_engine: AgentInterface = None
         # translate_engine can be none if translation is disabled
@@ -205,7 +206,7 @@ class ServiceContext:
         system_config: SystemConfig,
         character_config: CharacterConfig,
         live2d_model: Live2dModel,
-        asr_engine: ASRInterface,
+        asr_engine: ASRInterface | None,
         tts_engine: TTSInterface,
         vad_engine: VADInterface,
         agent_engine: AgentInterface,
@@ -334,6 +335,11 @@ class ServiceContext:
             logger.critical("Try to proceed without Live2D...")
 
     def init_asr(self, asr_config: ASRConfig) -> None:
+        if asr_config.asr_model is None:
+            logger.info("ASR is disabled.")
+            self.asr_engine = None
+            return
+
         if not self.asr_engine or (self.character_config.asr_config != asr_config):
             logger.info(f"Initializing ASR: {asr_config.asr_model}")
             self.asr_engine = ASRFactory.get_asr_system(

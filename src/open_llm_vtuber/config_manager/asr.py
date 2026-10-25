@@ -284,15 +284,17 @@ class SherpaOnnxASRConfig(I18nMixin):
 class ASRConfig(I18nMixin):
     """Configuration for Automatic Speech Recognition."""
 
-    asr_model: Literal[
-        "faster_whisper",
-        "whisper_cpp",
-        "whisper",
-        "azure_asr",
-        "fun_asr",
-        "groq_whisper_asr",
-        "sherpa_onnx_asr",
-    ] = Field(..., alias="asr_model")
+    asr_model: Optional[
+        Literal[
+            "faster_whisper",
+            "whisper_cpp",
+            "whisper",
+            "azure_asr",
+            "fun_asr",
+            "groq_whisper_asr",
+            "sherpa_onnx_asr",
+        ]
+    ] = Field(None, alias="asr_model")
     azure_asr: Optional[AzureASRConfig] = Field(None, alias="azure_asr")
     faster_whisper: Optional[FasterWhisperConfig] = Field(None, alias="faster_whisper")
     whisper_cpp: Optional[WhisperCPPConfig] = Field(None, alias="whisper_cpp")
@@ -307,7 +309,8 @@ class ASRConfig(I18nMixin):
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "asr_model": Description(
-            en="Speech-to-text model to use", zh="要使用的语音识别模型"
+            en="Speech-to-text model to use (leave empty/null to disable ASR)",
+            zh="要使用的语音识别模型（留空/null 表示禁用语音识别）",
         ),
         "azure_asr": Description(en="Configuration for Azure ASR", zh="Azure ASR 配置"),
         "faster_whisper": Description(
@@ -329,6 +332,10 @@ class ASRConfig(I18nMixin):
     @model_validator(mode="after")
     def check_asr_config(cls, values: "ASRConfig", info: ValidationInfo):
         asr_model = values.asr_model
+
+        # asr_model is None means ASR is disabled; nothing to validate.
+        if asr_model is None:
+            return values
 
         # Only validate the selected ASR model
         if asr_model == "AzureASR" and values.azure_asr is not None:

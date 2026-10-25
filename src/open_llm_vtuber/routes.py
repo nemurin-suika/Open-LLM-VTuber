@@ -213,6 +213,16 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         """
         logger.info(f"Received audio file for transcription: {file.filename}")
 
+        if default_context_cache.asr_engine is None:
+            logger.warning("Transcription requested but ASR is disabled.")
+            return Response(
+                content=json.dumps(
+                    {"error": "ASR is disabled (asr_model is not configured)"}
+                ),
+                status_code=503,
+                media_type="application/json",
+            )
+
         try:
             contents = await file.read()
 
