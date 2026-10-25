@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from enum import Enum
 import numpy as np
 from loguru import logger
@@ -111,6 +112,16 @@ class WebSocketHandler:
         # 비활성 세션 버퍼를 재생 큐로 되돌리기 위한 참조 (파이프라인 기동 시 주입)
         self._regular_pq: Optional[asyncio.Queue] = None
 
+        # ── 작업 중 세션의 입력 큐잉 (TODO25) ──────────────────────────────
+        # 같은 세션에서 턴이 돌고 있을 때 들어온 입력. 끼어들어 LLM 을 동시에
+        # 때리지 않고 여기 쌓아뒀다가, 턴이 끝나는 즉시 후속 작업으로 이어 돌린다.
+        # 값은 {"id", "ts", "item"} 목록.
+        self._pending_inputs: Dict[str, List[dict]] = {}
+        # 대기분을 실제 턴으로 올려주는 함수 (파이프라인 기동 시 주입)
+        self._start_turn: Optional[Callable] = None
+        # 인터럽트 직후처럼 자동 소화를 한 번 건너뛸 세션
+        self._skip_drain: set = set()
+
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
 
@@ -208,6 +219,135 @@ class WebSocketHandler:
             except Exception:
                 pass
 
+    # ── 작업 중 입력 큐잉 (TODO25) ───────────────────────────────────────
+
+    # 연달아 적은 입력으로 볼 간격. 이 안에 들어온 텍스트는 한 턴으로 합친다.
+    _QUEUE_MERGE_SLACK = 90.0
+    # 한 세션에 쌓아둘 수 있는 대기 입력 상한 (넘치면 가장 오래된 것부터 버린다)
+    _QUEUE_MAX_ITEMS = 20
+
+    def _session_busy(self, session_id: str) -> bool:
+        """그 세션이 지금 턴을 돌고 있는지."""
+        task = self._capture_tasks.get(session_id)
+        return task is not None and not task.done()
+
+    @staticmethod
+    def _queue_preview(item: dict) -> str:
+        """대기 말풍선에 보여줄 문구."""
+        raw = item.get("user_input")
+        if isinstance(raw, str):
+            return raw
+        return "[음성 입력]"
+
+    def _enqueue_pending(self, session_id: str, item: dict) -> dict:
+        """작업 중인 세션의 입력을 대기 큐에 쌓는다."""
+        queue = self._pending_inputs.setdefault(session_id, [])
+        while len(queue) >= self._QUEUE_MAX_ITEMS:
+            dropped = queue.pop(0)
+            logger.warning(
+                f"[queue] 대기 입력 상한({self._QUEUE_MAX_ITEMS}) 초과 — 가장 오래된 항목 폐기: "
+                f"{self._queue_preview(dropped['item'])[:40]}"
+            )
+        entry = {"id": f"q_{uuid.uuid4().hex[:8]}", "ts": time.time(), "item": item}
+        queue.append(entry)
+        logger.info(
+            f"[queue] 작업 중이라 입력을 대기열에 넣음 (session={session_id}, "
+            f"대기 {len(queue)}건): {self._queue_preview(item)[:40]}"
+        )
+        return entry
+
+    async def _notify_session_queue(self, session_id: str) -> None:
+        """그 세션의 대기 목록 스냅샷을 프론트에 알린다 (빈 배열이면 비었다는 뜻)."""
+        items = [
+            {"id": e["id"], "text": self._queue_preview(e["item"]), "ts": e["ts"]}
+            for e in self._pending_inputs.get(session_id, [])
+        ]
+        payload = json.dumps(
+            {"type": "session-queue", "session_id": session_id, "items": items},
+            ensure_ascii=False,
+        )
+        for ws in list(self.client_connections.values()):
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _queue_mergeable(entry: dict) -> bool:
+        """다른 입력과 한 턴으로 합쳐도 되는 항목인지.
+
+        이미지·시스템 오디오·자발 발화가 붙은 입력은 따로 처리한다
+        (첨부가 섞이면 어느 말에 딸린 것인지 알 수 없게 된다).
+        """
+        item = entry.get("item") or {}
+        meta = item.get("metadata") or {}
+        return (
+            isinstance(item.get("user_input"), str)
+            and bool(str(item.get("user_input")).strip())
+            and not item.get("images")
+            and not meta.get("system_audio")
+            and not meta.get("proactive_speak")
+        )
+
+    def _merge_pending(self, session_id: str) -> Optional[dict]:
+        """다음 턴으로 돌릴 입력 하나를 대기 큐에서 꺼낸다.
+
+        연달아 적은 글은 한 덩어리로 합쳐서 턴 수를 줄이고, 시간 간격이
+        벌어진 글이나 첨부가 붙은 입력은 합치지 않고 다음 턴으로 넘긴다.
+        """
+        queue = self._pending_inputs.get(session_id) or []
+        if not queue:
+            self._pending_inputs.pop(session_id, None)
+            return None
+        first = queue.pop(0)
+        item = first["item"]
+        if self._queue_mergeable(first):
+            texts = [str(item.get("user_input", ""))]
+            last_ts = first["ts"]
+            while (
+                queue
+                and self._queue_mergeable(queue[0])
+                and queue[0]["ts"] - last_ts <= self._QUEUE_MERGE_SLACK
+            ):
+                nxt = queue.pop(0)
+                texts.append(str(nxt["item"].get("user_input", "")))
+                last_ts = nxt["ts"]
+            if len(texts) > 1:
+                item = dict(item)
+                item["user_input"] = "\n".join(texts)
+                logger.info(
+                    f"[queue] 연달아 적은 입력 {len(texts)}건을 한 턴으로 합침 "
+                    f"(session={session_id})"
+                )
+        if not queue:
+            self._pending_inputs.pop(session_id, None)
+        return item
+
+    async def _drain_pending(self, session_id: str) -> None:
+        """턴이 끝난 뒤 대기분을 후속 작업처럼 이어서 돌린다."""
+        if self._session_busy(session_id):
+            return
+        if not self._pending_inputs.get(session_id):
+            return
+        if session_id in self._skip_drain:
+            # 인터럽트로 멈춘 직후. 쌓인 입력은 지우지 않고 보류만 한다.
+            self._skip_drain.discard(session_id)
+            logger.info(f"[queue] 인터럽트 직후라 자동 처리를 건너뜀 (session={session_id})")
+            return
+        starter = self._start_turn
+        if starter is None:
+            logger.warning("[queue] 파이프라인이 없어 대기 입력을 이어 돌리지 못함")
+            return
+        item = self._merge_pending(session_id)
+        if item is None:
+            return
+        logger.info(
+            f"[queue] 대기 입력을 이어서 처리 (session={session_id}, "
+            f"남은 대기 {len(self._pending_inputs.get(session_id, []))}건)"
+        )
+        await starter(item, session_id)
+        await self._notify_session_queue(session_id)
+
     async def _flush_session_buffer(self, session_id: str) -> None:
         """세션으로 넘어왔을 때 보류분을 재생 큐에 되돌린다.
 
@@ -261,6 +401,8 @@ class WebSocketHandler:
             "rename-session": self._handle_rename_session,
             # 다중 세션 동시 처리 (TODO19 3단계)
             "replay-session-buffer": self._handle_replay_session_buffer,
+            # 작업 중 입력 큐잉 (TODO25)
+            "cancel-queued-input": self._handle_cancel_queued_input,
             "create-new-history": self._handle_create_history,
             "delete-history": self._handle_delete_history,
             "interrupt-signal": self._handle_interrupt,
@@ -731,6 +873,10 @@ class WebSocketHandler:
                 if self._capture_tasks.get(sid) is asyncio.current_task():
                     self._capture_tasks.pop(sid, None)
                 ready.set()
+                # 작업 중이라 대기열에 쌓인 입력이 있으면 곧바로 이어서 돌린다 (TODO25).
+                # 이 task 안에서 await 하면 자기 자신이 끝나지 않으므로 별 task 로 띄운다.
+                if self._pending_inputs.get(sid):
+                    asyncio.create_task(self._drain_pending(sid))
 
         async def _capture_direct_tts(text: str, messages: list, ready: asyncio.Event) -> None:
             """LLM 없이 TTS를 직접 생성해 messages에 채운다 (오버로드 즉시 응답용)."""
@@ -1040,6 +1186,29 @@ class WebSocketHandler:
                 except Exception as e:
                     logger.error(f"Live playback error: {e}")
 
+        # ── 턴 시작 (일반 입력 / 대기열 소화 공용, TODO25) ────────────────────
+
+        async def _start_turn(item: dict, session_id: str) -> None:
+            """입력 하나를 실제 턴으로 올린다.
+
+            capture task 등록을 여기서 바로 해두는 게 중요하다. _capture 안에서만
+            등록하면 task 가 처음 깨어나기 전까지 "작업 중"으로 보이지 않아서,
+            그 틈에 들어온 입력이 큐를 거치지 않고 끼어들 수 있다.
+            """
+            meta = item.get("metadata") or {}
+            if meta.pop("_log_user_text", False):
+                text = item.get("user_input")
+                if isinstance(text, str) and text.strip():
+                    session_log.log_user_message(session_id, text)
+            msgs: list = []
+            rdy = asyncio.Event()
+            await regular_pq.put((msgs, rdy, session_id))
+            task = asyncio.create_task(_capture(item, msgs, rdy, session_id))
+            self._capture_tasks[session_id] = task
+
+        # 턴이 끝난 뒤 대기열을 소화할 때 쓰도록 핸들러에 노출
+        self._start_turn = _start_turn
+
         # ── priority consumer (donations, subscriptions) ──────────────────────
 
         async def _consume_priority() -> None:
@@ -1155,15 +1324,21 @@ class WebSocketHandler:
                 if chat_buffer:
                     await _flush_chat_buffer()
 
-                msgs: list = []
-                rdy = asyncio.Event()
                 # 입력이 들어온 시점의 세션을 꼬리표로 달아둔다. 이후 사용자가
                 # 다른 세션으로 옮겨가도 이 작업은 자기 세션에 그대로 저장된다.
                 sid = (item.get("metadata") or {}).get(
                     "session_id"
                 ) or self._active_session_id()
-                await regular_pq.put((msgs, rdy, sid))
-                asyncio.create_task(_capture(item, msgs, rdy, sid))
+
+                # 그 세션이 이미 턴을 돌고 있으면 끼어들지 않는다 (TODO25).
+                # 같은 대화 흐름에 LLM 호출을 겹쳐 넣으면 응답이 섞이므로,
+                # 대기열에 쌓아두고 지금 턴이 끝나는 즉시 이어서 돌린다.
+                if self._session_busy(sid):
+                    self._enqueue_pending(sid, item)
+                    await self._notify_session_queue(sid)
+                    continue
+
+                await _start_turn(item, sid)
 
         # ── run all three concurrently ────────────────────────────────────────
 
@@ -1239,6 +1414,16 @@ class WebSocketHandler:
             (data.get("session_id") if isinstance(data, dict) else None)
             or self._active_session_id()
         )
+        # 인터럽트는 "멈춰"라는 신호다. 대기열에 쌓인 입력을 곧바로 이어 돌리면
+        # 멈춘 것처럼 보이지 않으므로, 이번 턴 종료 시 자동 소화를 한 번 건너뛴다.
+        # 다만 적어둔 말을 지우지는 않고 보류 상태로 남겨둔다 (TODO25).
+        if self._pending_inputs.get(target_sid):
+            self._skip_drain.add(target_sid)
+            logger.info(
+                f"[Interrupt] 대기 입력 {len(self._pending_inputs[target_sid])}건은 "
+                f"자동 처리하지 않고 보류 (session={target_sid})"
+            )
+
         task = self._capture_tasks.get(target_sid)
         if task and not task.done():
             logger.info(f"[Interrupt] capture task 취소 (session={target_sid})")
@@ -1348,6 +1533,10 @@ class WebSocketHandler:
             "unread_counts": {
                 sid: len(turns) for sid, turns in self._session_buffers.items() if turns
             },
+            # 작업 중이라 아직 전달되지 않고 대기 중인 입력 건수 (TODO25)
+            "queued_counts": {
+                sid: len(q) for sid, q in self._pending_inputs.items() if q
+            },
         }
         if extra:
             payload.update(extra)
@@ -1371,6 +1560,8 @@ class WebSocketHandler:
             )
             return
         await self._send_session_list(websocket, agent)
+        # 새로고침 후에도 대기 중인 입력 말풍선이 되살아나게 스냅샷을 같이 보낸다
+        await self._notify_session_queue(self._active_session_id())
 
     async def _handle_create_session(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1420,6 +1611,8 @@ class WebSocketHandler:
                 ensure_ascii=False,
             )
         )
+        # 옮겨간 세션에 대기 중인 입력이 있으면 그 목록도 같이 보낸다 (TODO25)
+        await self._notify_session_queue(active)
 
     async def _handle_replay_session_buffer(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1430,6 +1623,22 @@ class WebSocketHandler:
             # 그 사이 또 옮겨갔다면 재생하지 않고 버퍼를 그대로 둔다.
             return
         await self._flush_session_buffer(target)
+
+    async def _handle_cancel_queued_input(
+        self, websocket: WebSocket, client_uid: str, data: dict
+    ) -> None:
+        """대기 중인 입력 한 건 취소 (적어놓고 마음이 바뀐 경우, TODO25)."""
+        sid = str(data.get("session_id") or self._active_session_id())
+        target = str(data.get("id") or "")
+        queue = self._pending_inputs.get(sid) or []
+        remain = [e for e in queue if e["id"] != target]
+        if len(remain) != len(queue):
+            logger.info(f"[queue] 대기 입력 취소 (session={sid}, id={target})")
+        if remain:
+            self._pending_inputs[sid] = remain
+        else:
+            self._pending_inputs.pop(sid, None)
+        await self._notify_session_queue(sid)
 
     async def _handle_delete_session(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1443,6 +1652,8 @@ class WebSocketHandler:
         if _task and not _task.done():
             _task.cancel()
         self._session_buffers.pop(target, None)
+        self._pending_inputs.pop(target, None)
+        self._skip_drain.discard(target)
         session_log.drop_session_log(target)
         success = await agent.delete_session(target)
         await self._send_session_list(
@@ -1711,10 +1922,12 @@ class WebSocketHandler:
         )
 
         # letta 는 턴이 끝난 뒤에야 발화를 저장한다. 작업을 시켜 두고 다른 세션에
-        # 갔다 돌아왔을 때 방금 시킨 말이 화면에서 사라지지 않도록, 받은 즉시
-        # 세션 보조 로그에 남긴다. (자발 발화 트리거는 네무린 말이 아니라 제외)
+        # 갔다 돌아왔을 때 방금 시킨 말이 화면에서 사라지지 않도록 세션 보조 로그에
+        # 남기는데, 기록 시점은 실제로 턴에 올라가는 순간(_start_turn)이다.
+        # 작업 중이라 대기열에 머무는 입력까지 미리 적으면, 아직 전달도 안 된 말이
+        # 복원 기록에 먼저 나타나 대기 말풍선과 겹쳐 보인다. (자발 발화는 제외)
         if msg_type == "text-input" and isinstance(user_input, str):
-            session_log.log_user_message(metadata["session_id"], user_input)
+            metadata["_log_user_text"] = True
 
         await put_immediate({
             "user_input": user_input,
