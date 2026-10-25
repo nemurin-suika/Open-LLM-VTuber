@@ -114,6 +114,11 @@ class WebSocketHandler:
         self._session_buffers: Dict[str, List[List[str]]] = {}
         # 비활성 세션 버퍼를 재생 큐로 되돌리기 위한 참조 (파이프라인 기동 시 주입)
         self._regular_pq: Optional[asyncio.Queue] = None
+        # 지금 화면으로 흘려보내고 있는(=라이브 재생 중인) 세션 id 집합.
+        # 재생 도중 세션이 바뀌면 남은 발화를 보류 버퍼로 되돌리는데, 그 되돌림이
+        # 끝나기 전에 replay-session-buffer 요청이 들어오면 빈 버퍼를 보고 지나칠 수
+        # 있다. 그 경합을 막기 위해 "아직 정리 중"임을 표시해둔다.
+        self._live_replays: set = set()
 
         # ── 작업 중 세션의 입력 큐잉 (TODO25) ──────────────────────────────
         # 같은 세션에서 턴이 돌고 있을 때 들어온 입력. 끼어들어 LLM 을 동시에
@@ -193,11 +198,21 @@ class WebSocketHandler:
             out.append(raw)
         return out
 
-    def _buffer_session_turn(self, session_id: str, messages: List[str]) -> None:
-        """비활성 세션의 완성된 턴을 보류 버퍼에 쌓는다."""
+    def _buffer_session_turn(
+        self, session_id: str, messages: List[str], front: bool = False
+    ) -> None:
+        """비활성 세션의 완성된 턴을 보류 버퍼에 쌓는다.
+
+        front=True 는 "재생 중간에 끊겨서 돌려놓는 남은 조각"처럼 이미 쌓여 있는
+        턴들보다 시간상 앞선 발화일 때 쓴다 (버퍼 맨 앞에 넣는다).
+        """
         if not messages:
             return
-        self._session_buffers.setdefault(session_id, []).append(list(messages))
+        bucket = self._session_buffers.setdefault(session_id, [])
+        if front:
+            bucket.insert(0, list(messages))
+        else:
+            bucket.append(list(messages))
         logger.info(
             f"[session] 비활성 세션 발화 보류 (session={session_id}, "
             f"대기 {len(self._session_buffers[session_id])}턴)"
@@ -1042,8 +1057,37 @@ class WebSocketHandler:
             total_audio_ms = 0
             audio_chunk_count = 0
             send_failed = False
+            # 재생 도중 사용자가 다른 세션으로 넘어가면 남은 발화를 여기에 담아
+            # 그 세션 보류 버퍼로 되돌린다. 돌아오면 멈춘 자리부터 이어서 말한다.
+            leftover: Optional[list] = None
+
+            def _left_session() -> bool:
+                """사용자가 이 세션을 떠났는지."""
+                return bool(session_id) and session_id != self._active_session_id()
+
+            async def _play_wait(duration: float) -> bool:
+                """오디오 한 덩어리가 재생되는 동안 대기. 중간에 세션이 바뀌면 True.
+
+                통째로 sleep 하지 않고 잘게 끊어 기다린다. 그래야 떠난 걸 빨리 알아채고
+                뒤 문장을 화면(=남의 세션)으로 흘려보내지 않는다.
+                """
+                waited = 0.0
+                step = 0.2
+                while waited < duration:
+                    await asyncio.sleep(min(step, duration - waited))
+                    waited += step
+                    if _left_session():
+                        return True
+                return False
+
+            if session_id:
+                self._live_replays.add(session_id)
             try:
-                for raw in messages:
+                for pos, raw in enumerate(messages):
+                    # 앞 문장 재생이 끝난 직후 떠났다면, 그 다음 문장부터 보류한다.
+                    if _left_session():
+                        leftover = list(messages[pos:])
+                        break
                     await ws.send_text(raw)
                     try:
                         data = json.loads(raw)
@@ -1058,7 +1102,11 @@ class WebSocketHandler:
                                 f"{chunk_ms}ms  (cumul={total_audio_ms}ms)"
                             )
                             # Progressive: wait for this chunk to play before sending next
-                            await asyncio.sleep(chunk_ms / 1000)
+                            if await _play_wait(chunk_ms / 1000):
+                                # 이 문장을 말하던 중에 떠났다 → 프론트가 재생을 끊었으므로
+                                # 반만 들린 이 문장부터 다시 들려준다.
+                                leftover = list(messages[pos:])
+                                break
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -1067,7 +1115,16 @@ class WebSocketHandler:
                 logger.warning(f"[TTS-DBG #{idx}] Error during replay send: {e}")
                 send_failed = True
             finally:
-                if total_audio_ms > 0:
+                if session_id:
+                    self._live_replays.discard(session_id)
+                if leftover:
+                    self._buffer_session_turn(str(session_id), leftover, front=True)
+                    logger.info(
+                        f"[TTS-DBG #{idx}] ⏸ 세션 이동으로 재생 중단 "
+                        f"(session={session_id}, 남은 {len(leftover)}개 보류)"
+                    )
+                    await self._notify_session_activity(str(session_id))
+                elif total_audio_ms > 0:
                     if send_failed:
                         await asyncio.sleep(2.0)
                     else:
@@ -1684,6 +1741,12 @@ class WebSocketHandler:
         if target != self._active_session_id():
             # 그 사이 또 옮겨갔다면 재생하지 않고 버퍼를 그대로 둔다.
             return
+        # 떠난 세션의 재생이 아직 남은 조각을 보류 버퍼로 되돌리는 중일 수 있다.
+        # 그걸 기다리지 않으면 빈 버퍼를 보고 지나쳐서, 이어 말하기가 한 번 밀린다.
+        for _ in range(20):  # 최대 2초
+            if not self._live_replays:
+                break
+            await asyncio.sleep(0.1)
         await self._flush_session_buffer(target)
 
     async def _handle_cancel_queued_input(
