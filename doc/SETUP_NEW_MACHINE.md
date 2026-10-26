@@ -19,7 +19,7 @@ cd ~/develop/Open-LLM-VTuber-v1.2.1-en && ./scripts/bootstrap.sh
 ```
 
 그 뒤 손으로 할 일은 네 가지다. **Live2D 모델 폴더 복사**,
-**목소리 참조 음성 복사**, **페르소나 작성**, **Codex CLI 로그인**.
+**목소리 참조 음성 복사**, **페르소나 작성**, **LLM CLI 로그인**.
 자세한 건 아래.
 
 `bootstrap.sh` 는 GPT-SoVITS 모델까지 받으므로 처음 한 번은 삼십 분 이상
@@ -69,12 +69,12 @@ GPT-SoVITS 는 파이썬 3.9 전용 환경을 저장소 안의 `.venv` 에 따�
 ./scripts/bootstrap.sh --skip-tts   # 목소리는 나중에
 ```
 
-1. 필요한 도구 점검 — `postgresql@17`, `redis`, `node`, `ollama`, `uv`, `codex`
+1. 필요한 도구 점검 — `postgresql@17`, `redis`, `node`, `ollama`, `uv`, `claude` 또는 `codex`
 2. letta / 프론트엔드 / GPT-SoVITS 저장소 클론
 3. `frontend` 심볼릭 링크 연결
-4. `letta/run.sh` 의 절대경로·LAN 주소를 이 맥 기준으로 치환
-5. 런타임 홈 `~/ai` 생성
-6. PostgreSQL 데이터 디렉토리 `initdb` (`~/ai/.mizuki/pgdata`)
+4. `~/.mizuki_env` 생성 — 이 맥에서만 다른 값(홈 경로·쓰는 CLI·승인 서버 주소)
+5. `scripts/claude_hook_settings.json` 생성 — 템플릿의 `__REPO_ROOT__` 치환
+6. PostgreSQL 데이터 디렉토리 `initdb` (`$MIZUKI_AI_HOME/.mizuki/pgdata`)
 7. `uv sync` (백엔드·letta), `npm install` (프론트엔드)
 8. GPT-SoVITS 설치 — `GPT-SoVITS/scripts/setup-mac.sh` 를 불러서 수행
 9. `ollama pull bge-m3`
@@ -101,10 +101,26 @@ GPT-SoVITS 는 파이썬 3.9 전용 환경을 저장소 안의 `.venv` 에 따�
 중국어·v3 전용이고 합치면 수 기가다. `api_v2` 는 v2 로만 돌고,
 **한국어는 v2 에서만 지원**하므로 v3 쪽은 아예 쓰지 않는다.
 
-### 치환에 대한 주의
+### 머신별 설정은 `~/.mizuki_env` 하나로 모은다
 
-4번에서 `letta/run.sh` 를 직접 고친다. 그 저장소에 로컬 수정이 남으므로
-**그 변경은 커밋하지 않는다**. 되돌리려면 `git -C <letta> checkout run.sh`.
+예전에는 `letta/run.sh` 를 맥마다 직접 고쳤다. 그러면 양쪽에서 같은 줄을
+서로 다르게 바꿔 놓고 pull 할 때마다 충돌이 난다. 그래서 **저장소 파일은
+건드리지 않고** 홈에 둔 `~/.mizuki_env` 만 머신마다 다르게 둔다.
+`letta/run.sh` 와 `scripts/start-all.sh` 가 첫머리에서 이 파일을 읽는다.
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `MIZUKI_REAL_HOME` | 현재 `$HOME` | 실제 홈 |
+| `MIZUKI_AI_HOME` | `MIZUKI_REAL_HOME` | letta 런타임이 `HOME` 으로 쓸 곳. 실제 홈을 건드리면 안 되는 맥은 `$HOME/ai` |
+| `MIZUKI_LLM_CLI` | `claude` | `claude` 또는 `codex`. 로그인 확인 분기에 쓴다 |
+| `LLM_FALLBACK_CONFIG` | claude-cli 72000 | 폴백 모델 JSON |
+| `VTUBER_APPROVAL_URL` | `http://192.168.0.5:12393/tool-approval` | 툴 승인 서버. 로컬 전용이면 `127.0.0.1` |
+| `VTUBER_CLAUDE_HOOK_SETTINGS` | `$MIZUKI_REAL_HOME/develop/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json` | 승인 hook 설정 파일 |
+| `MIZUKI_SECRETS_FILE` | `$MIZUKI_REAL_HOME/.secrets` | 없으면 건너뛴다 |
+| `MIZUKI_SPEAK_ONLY_FINAL` | 끔 | `1` 이면 툴을 쓰는 step 의 대사는 채팅 텍스트로만 내보내고 마지막 덩어리만 음성으로 읽는다 |
+
+`scripts/claude_hook_settings.json` 도 저장소 절대경로가 들어가므로 추적하지
+않는다. 템플릿(`.template`)의 `__REPO_ROOT__` 를 bootstrap 이 치환해 만든다.
 
 ---
 
@@ -136,7 +152,7 @@ python3 scripts/make_conf.py --set port=12394 --set tts_model=gpt_sovits_tts
 | `character_name` / `human_name` | `미즈키` / `사용자` | 표시 이름 |
 | `live2d_model_name` | `MIA` | `model_dict.json` 의 `name` 과 같아야 함 |
 | `letta_host` / `letta_port` | `localhost` / `8283` | letta 서버 |
-| `letta_model` | `codex_cli/gpt-6-sol` | letta 쪽 LLM handle |
+| `letta_model` | `claude_cli/claude-opus-5` | letta 쪽 LLM handle. codex 면 `codex_cli/gpt-6-sol` |
 | `letta_embedding` | `ollama-local/bge-m3:latest` | 임베딩 handle |
 | `context_window_limit` | `100000` | 컨텍스트 상한 |
 | `asr_model` | `null` | 마이크를 쓰면 `sherpa_onnx_asr` |
@@ -158,8 +174,12 @@ python3 scripts/make_conf.py --set port=12394 --set tts_model=gpt_sovits_tts
 
 `asr_model: null` 이면 ASR 엔진을 아예 초기화하지 않는다. sherpa-onnx 모델
 파일(수백 MB)을 받아 둘 필요가 없다. 이 상태에서 음성 입력이 들어오면
-에러 메시지를 돌려주고 대화는 계속된다. 마이크를 쓰려면 `asr_model` 과
-`vad_model` 을 함께 채우고 모델 파일을 받아야 한다.
+에러 메시지를 돌려주고 대화는 계속된다.
+
+집도 2026-10-26 부터 마이크를 쓰지 않아 ASR 을 껐다. `sherpa-onnx` 는 pypi 에
+휠이 없어 로컬 빌드한 경로를 의존성에 박아야 했는데, 그 절대경로가 맥마다
+달라 매번 문제가 됐다. 그래서 의존성 자체를 뺐다. 마이크를 다시 쓰려면
+`sherpa-onnx` 를 직접 빌드해 넣고 `asr_model`·`vad_model` 을 함께 채운다.
 
 ---
 
@@ -184,7 +204,7 @@ python3 scripts/make_conf.py --set port=12394 --set tts_model=gpt_sovits_tts
 참조 음성과 대사는 `conf.yaml` 값을 그대로 환경 변수로 넘기므로 설정 한 곳만
 고치면 양쪽이 같이 따라온다. 모델을 올리는 데 시간이 걸려서 백엔드보다 먼저
 띄우고 포트가 열릴 때까지 기다리지만, 늦게 떠도 대화 자체는 된다(그 몇 마디만
-소리 없이 지나간다). 로그는 `~/ai/.mizuki/logs/gpt-sovits.log`.
+소리 없이 지나간다). 로그는 `$MIZUKI_AI_HOME/.mizuki/logs/gpt-sovits.log`.
 
 첫 기동에서 `frontend/dist/web` 이 없으면 자동으로 빌드하고 띄운다.
 
@@ -232,7 +252,8 @@ ffmpeg -i saki.mp3 -c:a pcm_s16le ~/develop/GPT-SoVITS-v3lora-20250228/saki.wav
 
 ### 5-3. 로그인과 키
 
-- `codex login` — letta 가 `codex_cli` 모델을 쓸 때 필요하다.
+- `claude auth login` 또는 `codex login` — `~/.mizuki_env` 의 `MIZUKI_LLM_CLI` 와
+  같은 쪽을 로그인한다. letta 가 그 CLI 를 자식 프로세스로 띄운다.
 - 기본 구성은 `ollama-local/bge-m3` 임베딩이라 secrets 파일이 필요 없다. Gemini 등을
   쓰려면 `GEMINI_API_KEY` 또는 `GEMINI_API_KEYS` 를 환경변수로 넘긴다.
 
@@ -256,10 +277,10 @@ python3 scripts/make_conf.py --persona ~/persona.txt --force
 | 표정이 안 바뀜 | `model_dict.json` 의 `emotionMap`, 모델의 `Expressions` 등록 여부 |
 | 입이 안 움직임 | model3.json 의 `Groups` 에 `LipSync` 가 있고 `Ids` 가 비어 있지 않은지 |
 | 말투·기억이 예전 그대로 | letta 보다 백엔드가 먼저 떴을 때 생긴다. `--stop` 후 `start-all.sh` 로 다시 |
-| letta 가 안 뜸 | `tail -n 100 ~/ai/.mizuki/logs/letta.log`, postgres/redis 기동 여부 |
+| letta 가 안 뜸 | `tail -n 100 $MIZUKI_AI_HOME/.mizuki/logs/letta.log`, postgres/redis 기동 여부 |
 | postgres 가 바로 죽음 | 로케일. `LANG`/`LC_ALL` 이 `en_US.UTF-8` 인지 |
 | 포트 점유 | `./scripts/start-all.sh --status` → `--stop` |
-| 소리가 안 남 | `--status` 로 9880 확인 → `tail -n 100 ~/ai/.mizuki/logs/gpt-sovits.log` |
+| 소리가 안 남 | `--status` 로 9880 확인 → `tail -n 100 $MIZUKI_AI_HOME/.mizuki/logs/gpt-sovits.log` |
 | 목소리 서버가 바로 죽음 | `tts_infer_mac.yaml` 을 쓰는지. 기본 `tts_infer.yaml` 은 `device: cuda` 라 맥에서 터진다 |
 | 참조 음성을 못 찾음 | `conf.yaml` 의 `ref_audio_path` 가 GPT-SoVITS 저장소 루트 기준 상대경로인지 |
 | 발음이 뭉개짐 | `prompt_text` 가 참조 음성의 실제 대사와 같은지 |

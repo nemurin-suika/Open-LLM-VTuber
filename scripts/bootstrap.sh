@@ -59,7 +59,9 @@ TTS_BRANCH="nemurin"
 TTS_DIRNAME="GPT-SoVITS-v3lora-20250228"
 
 BREW_PACKAGES=(postgresql@17 redis node ollama)
-MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME/ai}"
+# letta 런타임이 HOME 으로 쓰는 디렉토리. 집은 실제 홈을 그대로 쓰고,
+# 실제 홈을 건드리면 안 되는 맥(예: 회사)은 MIZUKI_AI_HOME=$HOME/ai 처럼 따로 준다.
+MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -160,10 +162,13 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 info "OK   uv ($(uv --version 2>/dev/null))"
 
-if command -v codex >/dev/null 2>&1; then
+# letta 는 claude_cli 또는 codex_cli provider 로 로컬 CLI 를 띄운다. 둘 중 하나면 된다.
+if command -v claude >/dev/null 2>&1; then
+    info "OK   claude CLI"
+elif command -v codex >/dev/null 2>&1; then
     info "OK   codex CLI"
 else
-    warn "codex CLI 가 없습니다. letta 의 codex_cli 모델을 쓰려면 Codex CLI 설치와 로그인이 필요합니다."
+    warn "claude / codex CLI 가 둘 다 없습니다. letta 모델을 쓰려면 하나는 설치·로그인해야 합니다."
 fi
 
 # ── 2. 저장소 클론 ────────────────────────────────────────────────────────────
@@ -200,35 +205,59 @@ else
     info "연결 완료: frontend -> $WEB_DIR"
 fi
 
-# ── 4. 이 맥에 맞게 경로·주소 치환 ────────────────────────────────────────────
-step "로컬 환경에 맞게 경로 치환"
-# letta/run.sh 에는 개발 환경의 절대경로와 LAN 주소가 들어 있다.
-# 사용자명이 다르거나 로컬 전용으로 쓸 때는 바꿔 줘야 한다.
-LETTA_RUN="$LETTA_DIR/run.sh"
-if [ -f "$LETTA_RUN" ]; then
-    changed=0
-    # 개발 환경의 홈 디렉토리가 그대로 박혀 있으면 이 맥 기준으로 맞춘다.
-    if grep -qE '/Users/[A-Za-z0-9._-]+/' "$LETTA_RUN"; then
-        sed -i '' -E "s|/Users/[A-Za-z0-9._-]+/|${HOME}/|g" "$LETTA_RUN" && changed=1
-        info "letta/run.sh: 홈 디렉토리 경로를 $HOME 으로 치환"
-    fi
-    if grep -q 'VTUBER_APPROVAL_URL=http://192\.168\.' "$LETTA_RUN"; then
-        sed -i '' "s|VTUBER_APPROVAL_URL=http://192\.168\.[0-9.]*:|VTUBER_APPROVAL_URL=http://127.0.0.1:|" "$LETTA_RUN" && changed=1
-        info "letta/run.sh: 승인 서버 주소를 127.0.0.1 로 치환"
-    fi
-    # 백엔드 경로가 이 저장소와 다른 이름일 수 있으므로 한 번 더 맞춘다.
-    if grep -q 'VTUBER_CLAUDE_HOOK_SETTINGS=' "$LETTA_RUN"; then
-        sed -i '' "s|VTUBER_CLAUDE_HOOK_SETTINGS=.*|VTUBER_CLAUDE_HOOK_SETTINGS=$REPO_ROOT/scripts/claude_hook_settings.json|" "$LETTA_RUN" && changed=1
-        info "letta/run.sh: 훅 설정 경로를 이 저장소로 맞춤"
-    fi
-    [ "$changed" = "0" ] && info "치환할 것이 없습니다."
-    # 치환 결과가 커밋으로 섞이지 않게 알려 준다.
-    if ! git -C "$LETTA_DIR" diff --quiet 2>/dev/null; then
-        warn "letta 저장소에 로컬 수정이 생겼습니다. 이 변경은 커밋하지 마세요."
-    fi
+# ── 4. 머신별 환경 파일 (~/.mizuki_env) ───────────────────────────────────────
+step "머신별 환경 파일 (~/.mizuki_env)"
+# letta/run.sh 는 첫 줄에서 ~/.mizuki_env 를 읽는다. 저장소 밖 파일이라
+# 머신마다 다른 값을 여기에만 적어 두면 git 충돌이 생기지 않는다.
+# 기본값은 집(맥미니 / claude CLI) 기준이고, 다른 맥은 이 파일만 다르다.
+MZ_ENV="$HOME/.mizuki_env"
+HOOK_SETTINGS="$REPO_ROOT/scripts/claude_hook_settings.json"
+
+if command -v claude >/dev/null 2>&1; then
+    DETECTED_CLI="claude"
+elif command -v codex >/dev/null 2>&1; then
+    DETECTED_CLI="codex"
 else
-    warn "$LETTA_RUN 이 없습니다. letta 클론을 확인하세요."
+    DETECTED_CLI="claude"
 fi
+
+if [ -f "$MZ_ENV" ]; then
+    info "이미 있음 — 손대지 않습니다: $MZ_ENV"
+    info "감지된 CLI: $DETECTED_CLI (필요하면 MIZUKI_LLM_CLI 를 직접 맞추세요)"
+else
+    if [ "$DETECTED_CLI" = "codex" ]; then
+        FALLBACK_JSON='{"model": "gpt-5.5", "model_endpoint_type": "codex_cli", "context_window": 128000}'
+    else
+        FALLBACK_JSON='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 72000}'
+    fi
+    cat > "$MZ_ENV" <<MZENV
+# letta/run.sh 가 읽는 머신별 설정. 저장소에 넣지 않는다.
+MIZUKI_REAL_HOME=$HOME
+MIZUKI_AI_HOME=$MIZUKI_AI_HOME
+MIZUKI_LLM_CLI=$DETECTED_CLI
+LLM_FALLBACK_CONFIG='$FALLBACK_JSON'
+VTUBER_CLAUDE_HOOK_SETTINGS=$HOOK_SETTINGS
+VTUBER_APPROVAL_URL=http://127.0.0.1:12393/tool-approval
+# 여러 step 에 걸친 대사 중 마지막 덩어리만 음성으로 읽고 싶으면 1 로 켠다.
+# MIZUKI_SPEAK_ONLY_FINAL=1
+MZENV
+    chmod 600 "$MZ_ENV"
+    info "생성 완료: $MZ_ENV (CLI=$DETECTED_CLI)"
+fi
+
+# 툴 승인 hook 설정 파일은 절대경로가 들어가므로 템플릿에서 만든다.
+HOOK_TEMPLATE="$REPO_ROOT/scripts/claude_hook_settings.json.template"
+if [ -f "$HOOK_SETTINGS" ]; then
+    info "이미 있음 — 손대지 않습니다: scripts/claude_hook_settings.json"
+elif [ -f "$HOOK_TEMPLATE" ]; then
+    sed "s|__REPO_ROOT__|$REPO_ROOT|g" "$HOOK_TEMPLATE" > "$HOOK_SETTINGS"
+    info "생성 완료: scripts/claude_hook_settings.json"
+else
+    warn "$HOOK_TEMPLATE 이 없습니다. 툴 승인 팝업이 동작하지 않습니다."
+fi
+
+LETTA_RUN="$LETTA_DIR/run.sh"
+[ -f "$LETTA_RUN" ] || warn "$LETTA_RUN 이 없습니다. letta 클론을 확인하세요."
 
 # ── 5. 런타임 홈 ──────────────────────────────────────────────────────────────
 step "런타임 홈 (${MIZUKI_AI_HOME})"
@@ -349,7 +378,8 @@ cat <<GUIDE
    소리만 먼저 확인하고 싶으면 tts_model 을 edge_tts 로 바꾸면 설치 없이 납니다.
 
 3) 로그인·키
-   - Codex CLI: 'codex login' 한 번 실행
+   - LLM CLI: 'claude auth login' 또는 'codex login' 한 번 실행
+     (~/.mizuki_env 의 MIZUKI_LLM_CLI 와 같은 쪽을 로그인해야 합니다)
    - 기본 구성은 ollama-local/bge-m3 임베딩이라 별도 secrets 파일이 필요 없습니다.
      Gemini 등을 쓰려면 GEMINI_API_KEY 또는 GEMINI_API_KEYS 를 환경변수로 넘기세요.
 

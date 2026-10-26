@@ -29,9 +29,16 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="$(dirname "$REPO_ROOT")"
-MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME/ai}"
+# letta 런타임 HOME. 집은 실제 홈, 실제 홈을 건드리면 안 되는 맥은 ~/ai 처럼 따로 준다.
+# ~/.mizuki_env 에 적어 두면 letta/run.sh 와 같은 값을 쓴다.
+if [ -r "$HOME/.mizuki_env" ]; then
+    set -a   # 여기서 읽은 값은 백엔드 프로세스까지 물려줘야 한다
+    . "$HOME/.mizuki_env"
+    set +a
+fi
+MIZUKI_AI_HOME="${MIZUKI_AI_HOME:-$HOME}"
 LETTA_DIR="${LETTA_REPO_DIR:-$BASE_DIR/letta}"
-LOG_DIR="$MIZUKI_AI_HOME/.mizuki/logs"
+LOG_DIR="${MIZUKI_LOG_DIR:-$MIZUKI_AI_HOME/.mizuki/logs}"
 LETTA_LOG="$LOG_DIR/letta.log"
 LETTA_PID="$LOG_DIR/letta.pid"
 

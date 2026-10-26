@@ -73,7 +73,8 @@ FIELDS = [
 
     Field("letta_host", "__LETTA_HOST__", "localhost", "letta 서버 주소"),
     Field("letta_port", "__LETTA_PORT__", "8283", "letta 서버 포트", raw=True),
-    Field("letta_model", "__LETTA_MODEL__", "codex_cli/gpt-6-sol",
+    # codex CLI 를 쓰는 맥이면 'codex_cli/gpt-6-sol' 처럼 바꿔 넣는다.
+    Field("letta_model", "__LETTA_MODEL__", "claude_cli/claude-opus-5",
           "letta LLM handle"),
     Field("letta_embedding", "__LETTA_EMBEDDING__", "ollama-local/bge-m3:latest",
           "letta 임베딩 handle"),
