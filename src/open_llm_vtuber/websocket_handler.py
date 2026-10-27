@@ -90,8 +90,9 @@ class WSMessage(TypedDict, total=False):
 def _filter_images_for_screen_capture_setting(
     images: Optional[List[Dict[str, Any]]],
     screen_capture_enabled: bool,
+    screen_sharing_enabled: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Keep explicit uploads while honoring the screen-capture kill switch."""
+    """Keep uploads and explicitly allowed shared screens under capture restrictions."""
     if not images:
         return None
     if screen_capture_enabled:
@@ -101,7 +102,7 @@ def _filter_images_for_screen_capture_setting(
     dropped = 0
     for image in images:
         source = str(image.get("source", "")).lower() if isinstance(image, dict) else ""
-        if source == "upload":
+        if source == "upload" or (source == "screen" and screen_sharing_enabled):
             kept.append(image)
         else:
             dropped += 1
@@ -109,7 +110,8 @@ def _filter_images_for_screen_capture_setting(
     if dropped or kept:
         logger.info(
             "[ImageInput] enable_screen_capture=false: "
-            f"자동 캡처 {dropped}개 차단, 직접 첨부 {len(kept)}개 전달"
+            f"enable_screen_sharing={screen_sharing_enabled}, "
+            f"blocked={dropped}, allowed={len(kept)}"
         )
     return kept or None
 
@@ -2067,16 +2069,19 @@ class WebSocketHandler:
             if sys_audio:
                 metadata["system_audio"] = sys_audio
 
-        # Drop automatic screenshot/camera images when enable_screen_capture is False.
-        # Explicit chat uploads use source="upload" and should still reach the agent.
         screen_capture_enabled = (
             context.system_config.enable_screen_capture
             if context and hasattr(context, "system_config")
             else True
         )
         if not screen_capture_enabled:
-            images = _filter_images_for_screen_capture_setting(images, screen_capture_enabled)
-            # 시스템 오디오도 같은 토글로 묶어 비활성화 가능 (별도 토글 추가 시 분리)
+            images = _filter_images_for_screen_capture_setting(
+                images,
+                screen_capture_enabled,
+                screen_sharing_enabled=getattr(
+                    context.system_config, "enable_screen_sharing", False
+                ),
+            )
             metadata.pop("system_audio", None)
 
         # 다중 세션: 입력이 들어온 시점의 세션을 꼬리표로 박아둔다.
