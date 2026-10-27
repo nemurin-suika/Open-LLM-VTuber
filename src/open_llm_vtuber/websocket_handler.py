@@ -934,7 +934,8 @@ class WebSocketHandler:
                                 _sent_progress_texts.add(_text)
                                 _ts = _payload.get("timestamp") or time.time()
                                 session_log.log_progress(sid, _text, _ts)
-                                await ws.send_text(raw)
+                                _payload["session_id"] = sid
+                                await ws.send_text(json.dumps(_payload))
                             return
                         if _msg_type == "image_display":
                             if ws:

@@ -944,6 +944,12 @@ _REQUIRED_TOOLS = [
     "archival_memory_delete",
 ]
 _REQUIRED_BLOCKS = ["human", "persona"]
+_MEMORY_WRITE_TOOLS = frozenset({
+    "core_memory_append",
+    "core_memory_replace",
+    "archival_memory_insert",
+    "archival_memory_delete",
+})
 
 
 def _ensure_core_memory(sync_client: Letta, agent_id: str) -> None:
@@ -1615,6 +1621,7 @@ class LettaAgent(AgentInterface):
             os.environ.get("MIZUKI_SPEAK_ONLY_FINAL", "")
         ).strip().lower() in ("1", "true", "yes", "on")
         _pending_speech = ""
+        _deferred_final_speech = ""
         _had_tool_call = False
         _stream_failed = False
         _session_gist = ""        # [세션요약] 태그로 받은 현재 세션 한 줄 요약 (마지막 것 사용)
@@ -1873,17 +1880,22 @@ class LettaAgent(AgentInterface):
                     _stream_failed = True
                     continue
                 elif token.message_type == "tool_call_message":
-                    if _speak_only_final:
-                        if _pending_speech and _pending_speech not in _found_notifies:
-                            yield {"type": "progress_update", "text": _pending_speech, "timestamp": _time.time()}
-                            _found_notifies.add(_pending_speech)
+                    _tc = getattr(token, "tool_call", None)
+                    tool_name = getattr(_tc, "name", None) or "unknown"
+                    if _speak_only_final and tool_name != "unknown":
+                        if tool_name in _MEMORY_WRITE_TOOLS:
+                            if _pending_speech:
+                                _deferred_final_speech = _pending_speech
+                        else:
+                            _deferred_final_speech = ""
+                            if _pending_speech and _pending_speech not in _found_notifies:
+                                yield {"type": "progress_update", "text": _pending_speech, "timestamp": _time.time()}
+                                _found_notifies.add(_pending_speech)
                         _pending_speech = ""
-                    else:
+                    elif not _speak_only_final:
                         # 기본(집): step 마다 알림 중복 방지 집합을 비운다
                         _found_notifies = set()
                     _had_tool_call = True
-                    _tc = getattr(token, "tool_call", None)
-                    tool_name = getattr(_tc, "name", None) or "unknown"
                     tool_id = getattr(_tc, "id", None) or f"tc_{int(_time.time()*1000)}"
                     # hook이 /tool-approval POST 전에 읽어갈 수 있도록 reasoning을 파일에 저장
                     _save_reasoning(last_reasoning, self.conversation_id)
@@ -1904,6 +1916,8 @@ class LettaAgent(AgentInterface):
                     tool_name = getattr(token, "name", None) or "unknown"
                     tool_id = getattr(token, "tool_call_id", None) or getattr(token, "id", None) or f"tr_{int(_time.time()*1000)}"
                     status = getattr(token, "status", "success")
+                    if status != "success":
+                        _deferred_final_speech = ""
                     yield {"type": "tool_call_status", "status": status, "tool_name": tool_name, "tool_id": tool_id, "timestamp": _time.time()}
                     # 툴 반환 후 다시 응답 생성 단계로 전환
                     yield {"type": "agent_status", "status": "active", "detail": "생각 중", "timestamp": _time.time()}
@@ -1926,9 +1940,9 @@ class LettaAgent(AgentInterface):
                     if _stream_failed:
                         _yielded += 1
                         yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
-                    elif _pending_speech:
+                    elif _pending_speech or _deferred_final_speech:
                         _yielded += 1
-                        yield _pending_speech
+                        yield _pending_speech or _deferred_final_speech
                     elif _had_tool_call:
                         _yielded += 1
                         yield "작업이 완료되기 전에 응답이 중단됐습니다. 진행 내역을 확인해주세요."
