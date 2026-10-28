@@ -26,6 +26,7 @@ from .routes import (
 )
 from .service_context import ServiceContext
 from .config_manager.utils import Config
+from .codex_cost import init_codex_cost_route
 
 
 # Create a custom StaticFiles class that adds CORS headers
@@ -125,6 +126,7 @@ class WebSocketServer:
         self.app.include_router(init_tool_approval_route(ws_handler=ws_handler))
         # 재기동 전에 "다른 세션이 작업 중인가"를 물어볼 창구 (TODO26)
         self.app.include_router(init_session_status_route(ws_handler=ws_handler))
+        self.app.include_router(init_codex_cost_route(config))
 
         # Initialize and include proxy routes if proxy is enabled
         system_config = config.system_config
