@@ -42,7 +42,7 @@ from . import session_log
 # letta → OLV → TTS 합성 → 프론트 전송 → 재생이 남아 있어서, claude 소멸
 # 직후 스택을 종료하면 발화가 통째로 유실된다(2026-10-24 01:31 실제 발생).
 #
-#   delivered : captured replay 완료 = 오디오 payload 가 프론트로 전부 전송됨
+#   delivered : audio sent; playback completion notification is about to be sent
 #   played    : 프론트가 frontend-playback-complete 를 보냄 = 재생까지 끝남
 _TURN_MARK_FILE = os.environ.get("MIZUKI_TURN_MARK_FILE", "/tmp/mizuki_turn_done")
 
@@ -54,6 +54,7 @@ def mark_turn_stage(stage: str) -> None:
         with open(tmp, "w") as f:
             f.write(f"{stage} {time.time():.3f}\n")
         os.replace(tmp, _TURN_MARK_FILE)
+        logger.info(f"[TurnMark] stage={stage}")
     except Exception as e:  # pragma: no cover - 마커는 보조 기능
         logger.debug(f"[TurnMark] {stage} 기록 실패: {e}")
 
@@ -476,6 +477,16 @@ class WebSocketHandler:
         else:
             await self._replay_to_client(last)
 
+    async def _send_replay_message(self, websocket: WebSocket, raw: str) -> None:
+        """Record delivery before sending a notification that can trigger an ack."""
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict) and data.get("type") == "backend-synth-complete":
+            mark_turn_stage("delivered")
+        await websocket.send_text(raw)
+
     async def _replay_to_client(self, messages: List[str]) -> None:
         """파이프라인이 없을 때 쓰는 단순 전송 (순서 지연 없음)."""
         if not self.client_connections:
@@ -485,7 +496,7 @@ class WebSocketHandler:
             return
         for raw in messages:
             try:
-                await ws.send_text(raw)
+                await self._send_replay_message(ws, raw)
             except Exception:
                 break
 
@@ -1129,7 +1140,7 @@ class WebSocketHandler:
                     if _left_session():
                         leftover = list(messages[pos:])
                         break
-                    await ws.send_text(raw)
+                    await self._send_replay_message(ws, raw)
                     try:
                         data = json.loads(raw)
                         if data.get("type") == "audio" and data.get("audio"):
@@ -1340,7 +1351,6 @@ class WebSocketHandler:
                 try:
                     await _replay(msgs, idx, slot_session_id)
                     logger.info(f"[TTS-DBG #{idx}] ✓ replay done")
-                    mark_turn_stage("delivered")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
