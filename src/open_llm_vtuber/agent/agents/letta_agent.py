@@ -101,6 +101,11 @@ async def _preprocess_youtube_links(text: str) -> str:
 _YT_DLP_PATH = os.path.expanduser("~/develop/Open-LLM-VTuber-v1.2.1-en/yt-dlp_macos")
 _YT_FRAME_COUNT = 10
 _YT_DOWNLOAD_TIMEOUT = 180  # 초
+# YouTube JS 챌린지 해결용 런타임. launchd 환경은 PATH가 좁아서 절대경로를 명시한다.
+# 없으면 yt-dlp가 서명을 못 풀어 HTTP 403으로 실패한다 (2026-10-29 원인 확인).
+_YT_JS_RUNTIME_CANDIDATES = ("/opt/homebrew/bin/deno", "/usr/local/bin/deno")
+# 프레임 추출·오디오 분석 용도라 480p로 충분. 원본 화질은 1GB를 넘어 타임아웃을 유발한다.
+_YT_FORMAT = "bv*[height<=480]+ba/b[height<=480]/bv*+ba/b"
 _ANALYZE_AUDIO_URL = os.environ.get("ANALYZE_AUDIO_URL", "http://192.168.0.15:9881")
 _REASONING_FILE = "/tmp/mizuki_last_reasoning.json"
 # claude_cli_client.py가 실시간으로 쓰는 중간 알림 공유 파일
@@ -551,12 +556,36 @@ def _save_reasoning(text: str, session: Optional[str] = None) -> None:
         pass
 
 
+def _cleanup_yt_temp(uid: str) -> None:
+    """다운로드 실패/타임아웃 시 남은 .part·포맷 조각 파일 정리."""
+    for leftover in _glob.glob(f"/tmp/claude_yt_{uid}*"):
+        try:
+            os.unlink(leftover)
+        except Exception:
+            pass
+
+
 async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
     """yt-dlp_macos로 YouTube 영상을 /tmp에 다운로드. 실제 파일 경로 반환, 실패 시 None."""
     output_template = f"/tmp/claude_yt_{uid}.%(ext)s"
+    cmd = [
+        _YT_DLP_PATH,
+        "-f", _YT_FORMAT,
+        "--merge-output-format", "mp4",
+        "--no-progress", "--no-update", "--no-playlist",
+        "-o", output_template, url,
+    ]
+    runtime = next((p for p in _YT_JS_RUNTIME_CANDIDATES if os.path.exists(p)), None)
+    if runtime:
+        cmd[1:1] = ["--js-runtimes", f"deno:{runtime}"]
+    else:
+        logger.warning(
+            "[YouTube] JS 런타임(deno) 미설치 — YouTube가 HTTP 403을 반환할 수 있음. "
+            "brew install deno 로 설치 필요."
+        )
     try:
         proc = await asyncio.create_subprocess_exec(
-            _YT_DLP_PATH, "-t", "mp4", "-o", output_template, url,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -564,18 +593,33 @@ async def _download_youtube_video(url: str, uid: str) -> Optional[str]:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_YT_DOWNLOAD_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
             logger.warning(f"[YouTube] 다운로드 타임아웃 ({_YT_DOWNLOAD_TIMEOUT}s): {url}")
+            _cleanup_yt_temp(uid)
             return None
         if proc.returncode != 0:
-            logger.warning(f"[YouTube] 다운로드 실패 (exit {proc.returncode}): {stderr.decode()[:300]}")
+            err = stderr.decode(errors="replace").strip()
+            logger.warning(
+                f"[YouTube] 다운로드 실패 (exit {proc.returncode}): {err[-1500:]}"
+            )
+            _cleanup_yt_temp(uid)
             return None
-        files = _glob.glob(f"/tmp/claude_yt_{uid}.*")
+        files = [
+            f for f in _glob.glob(f"/tmp/claude_yt_{uid}.*")
+            if not f.endswith(".part")
+        ]
         if files:
             logger.info(f"[YouTube] 다운로드 완료: {files[0]}")
             return files[0]
+        logger.warning(f"[YouTube] 다운로드는 성공했으나 결과 파일이 없음: {url}")
+        _cleanup_yt_temp(uid)
         return None
     except Exception as e:
         logger.warning(f"[YouTube] 다운로드 오류: {e}")
+        _cleanup_yt_temp(uid)
         return None
 
 
@@ -655,11 +699,8 @@ async def _attach_youtube_frames(text: str) -> str:
         except Exception as e:
             logger.warning(f"[YouTube] 미디어 처리 오류 ({url}): {e}")
         finally:
-            if video_path and os.path.exists(video_path):
-                try:
-                    os.unlink(video_path)
-                except Exception:
-                    pass
+            # 본 영상 + 머지 전 포맷 조각 + .part 를 한 번에 정리
+            _cleanup_yt_temp(uid)
             if os.path.exists(audio_path):
                 try:
                     os.unlink(audio_path)
