@@ -2280,6 +2280,19 @@ class WebSocketHandler:
         context = self.client_contexts.get(client_uid)
 
         if msg_type == "ai-speak-signal":
+            # 자발 발화는 주인만 켤 수 있다 (TODO2 1-10, 2026-10-30 네무린 결정).
+            # 턴 큐(put_immediate)는 세션별이 아니라 전역 단일 큐라서, 손님이 창을
+            # 열어둔 채 자리를 비우면 idle 타이머가 20초마다 턴을 밀어넣어
+            # 주인 작업이 계속 밀리고 토큰도 그만큼 태운다. private 모드면
+            # 손님 화면 캡처와 시스템 오디오까지 매번 올라온다.
+            # 프론트에서 토글을 숨겨도 ws 로 직접 쏘면 그만이므로 여기서 끊는다.
+            if not self._identity(client_uid).is_owner:
+                logger.warning(
+                    f"손님 자발 발화 신호 무시: client={client_uid} "
+                    f"viewer={self._identity(client_uid).email}"
+                )
+                return
+
             mode = data.get("mode", "broadcast")
             if mode not in ("broadcast", "private"):
                 mode = "broadcast"
