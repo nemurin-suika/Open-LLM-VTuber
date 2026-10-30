@@ -119,6 +119,30 @@ _DEFAULT_SESSION_KEY = "default"
 _SESSION_KEY_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
+# ── 실패 원인 표시 (TODO 15) ───────────────────────────────────────────────
+# letta 쪽 claude_cli_client._failure_message()가 에러 메시지 앞에
+# [MIZUKI_FAIL:<kind>] 마커를 붙여 보낸다. 마커가 없으면 기존처럼 원인 불명 문구.
+_FAIL_MARKER_RE = re.compile(r"\[MIZUKI_FAIL:([a-z_]+)\]")
+
+_FAIL_KIND_MESSAGES = {
+    "auth": "클로드 로그인이 풀려서 호출이 거부됐어. 터미널에서 클로드 로그인 다시 해줘.",
+    "overload": "앤트로픽 서버 과부하로 재시도까지 다 실패했어. 조금 뒤에 다시 시켜줘.",
+    "usage_limit": "사용량 한도에 걸려서 호출이 막혔어. 한도가 풀릴 때까지 기다려야 해.",
+}
+
+
+def _extract_fail_reason(err: object) -> str:
+    """예외/문자열에서 실패 원인 문구를 뽑는다. 못 가리면 빈 문자열."""
+    try:
+        text = err if isinstance(err, str) else str(err)
+    except Exception:
+        return ""
+    m = _FAIL_MARKER_RE.search(text or "")
+    if not m:
+        return ""
+    return _FAIL_KIND_MESSAGES.get(m.group(1), "")
+
+
 def _sanitize_session_key(raw: Optional[str]) -> str:
     if not raw:
         return _DEFAULT_SESSION_KEY
@@ -1780,6 +1804,7 @@ class LettaAgent(AgentInterface):
         _deferred_final_speech = ""
         _had_tool_call = False
         _stream_failed = False
+        _fail_reason = ""         # 실패 원인 사람용 문구 (claude CLI 인증 만료/과부하 등, TODO 15)
         _session_gist = ""        # [세션요약] 태그로 받은 현재 세션 한 줄 요약 (마지막 것 사용)
         _gist_open = False        # [세션요약] 가 열린 채 토큰 경계를 넘어갔는지
         _gist_carry = ""          # 청크 경계에서 쪼개진 세션요약 태그 조각 보류분
@@ -1902,12 +1927,15 @@ class LettaAgent(AgentInterface):
         _stream_queue: asyncio.Queue = asyncio.Queue()
 
         async def _feed_stream() -> None:
-            nonlocal _stream_failed
+            nonlocal _stream_failed, _fail_reason
             try:
                 async for _t in stream:
                     await _stream_queue.put(_t)
             except Exception as _fe:
                 _stream_failed = True
+                _reason = _extract_fail_reason(_fe)
+                if _reason:
+                    _fail_reason = _reason
                 logger.error(f"[Letta] _feed_stream 오류: {_fe}")
             finally:
                 await _stream_queue.put(None)  # 종료 sentinel
@@ -2055,8 +2083,13 @@ class LettaAgent(AgentInterface):
                     yield text
                     continue
                 elif token.message_type == "letta_error":
-                    logger.error(f"[Letta] 에러 응답 수신: {getattr(token, 'error', token)}")
+                    _err_obj = getattr(token, "error", token)
+                    logger.error(f"[Letta] 에러 응답 수신: {_err_obj}")
                     _stream_failed = True
+                    # letta 가 실어 보낸 [MIZUKI_FAIL:...] 마커가 있으면 원인을 특정한다
+                    _reason = _extract_fail_reason(_err_obj) or _extract_fail_reason(token)
+                    if _reason:
+                        _fail_reason = _reason
                     continue
                 elif token.message_type == "tool_call_message":
                     _tc = getattr(token, "tool_call", None)
@@ -2118,7 +2151,7 @@ class LettaAgent(AgentInterface):
                 if _speak_only_final:
                     if _stream_failed:
                         _yielded += 1
-                        yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
+                        yield _fail_reason or "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
                     elif _pending_speech or _deferred_final_speech:
                         _yielded += 1
                         yield _pending_speech or _deferred_final_speech
@@ -2129,7 +2162,7 @@ class LettaAgent(AgentInterface):
                     # 기본(집)에서는 대사를 이미 다 흘려보냈으므로, 한 마디도 못 한
                     # 경우에만 중단 사실을 알린다. 정상 대사를 덮어쓰지 않는다.
                     _yielded += 1
-                    yield "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
+                    yield _fail_reason or "작업이 완료되기 전에 중단됐습니다. 진행 내역을 확인해주세요."
 
             # 스트림 종료 후 남은 ADB 스크린샷 마지막 flush
             while not _image_queue.empty():
