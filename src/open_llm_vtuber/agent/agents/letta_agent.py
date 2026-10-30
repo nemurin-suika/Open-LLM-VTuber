@@ -155,6 +155,44 @@ def reasoning_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
     return f"/tmp/mizuki_last_reasoning_{key}.json"
 
 
+def guest_flag_file(session_key: str = _DEFAULT_SESSION_KEY) -> str:
+    """손님 세션 표시 파일 경로 (TODO2 1-10).
+
+    이 파일이 있으면 그 세션은 네무린이 아닌 손님의 방이라는 뜻이다. letta 쪽
+    claude_cli_client.py 가 코어 기억 쓰기 태그를 버리고 archival 태그에 손님
+    표시를 넣을 때, claude_tool_approval_hook.py 가 도구를 자동 거절할 때
+    같은 경로를 본다. 두 프로세스가 별개라 /tmp 파일로 신호를 맞춘다.
+    내용은 {"email": ..., "name": ...} JSON.
+    """
+    key = _sanitize_session_key(session_key)
+    if key == _DEFAULT_SESSION_KEY:
+        return "/tmp/mizuki_guest.flag"
+    return f"/tmp/mizuki_guest_{key}.flag"
+
+
+def screenshot_dir(session_key: str = _DEFAULT_SESSION_KEY) -> str:
+    """세션별 스크린샷 작업 디렉터리 (letta 측 screenshot_dir 과 동일 규칙).
+
+    미즈키가 MIZUKI_SHOT_DIR 아래에 캡처를 저장하면 그 세션 화면에만 올라간다.
+    /tmp 루트 공용 감시는 세션 구분이 없어서 A 세션 캡처가 B 세션에도 떴다.
+    """
+    key = _sanitize_session_key(session_key)
+    return f"/tmp/mizuki_shots/{key}"
+
+
+def write_guest_flag(session_key: str, email: str = "", name: str = "") -> None:
+    """손님 세션이면 플래그 파일을 쓰고, 주인 세션이면 지운다."""
+    path = guest_flag_file(session_key)
+    try:
+        if email:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"email": email, "name": name or ""}, f, ensure_ascii=False)
+        elif os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        logger.warning(f"[identity] 손님 플래그 기록 실패 ({path}): {e}")
+
+
 # ── 다중 세션 동시 처리 (TODO19 3단계) ──────────────────────────────────────
 # LettaAgent 인스턴스는 전체 백엔드에서 하나만 공유된다. 그래서 세션 상태를
 # 인스턴스 필드에 두면 두 세션이 동시에 돌 때 서로의 값을 덮어쓴다.
@@ -184,24 +222,27 @@ def current_bound_session() -> Optional[str]:
 
 # ── 세션 메타: 사용자가 정한 이름 + 미즈키가 쓰는 최근 대화 한 줄 요약 ──
 # letta Conversation 스키마에는 name 필드가 없고 summary 하나뿐이라
-# summary 안에 JSON {"n": 이름, "g": 한 줄 요약} 두 값을 같이 넣는다.
+# summary 안에 JSON {"n": 이름, "g": 한 줄 요약, "o": 소유자 메일} 을 같이 넣는다.
+# "o" 는 TODO2 1-10 멀티 사용자용. 빈 값이면 주인(네무린) 세션이다(기존 세션 하위호환).
 # 과거에 평문으로 저장된 summary 는 이름으로 간주한다(하위호환).
 # letta 서버는 summary 를 create/fork 때만 쓰고 자동으로 덮어쓰지 않는다(2026-10-24 실측).
 _DEFAULT_SESSION_NAME = "메인"
 _DEFAULT_META_FILE = os.path.expanduser("~/.mizuki/session_default_meta.json")
 
 
-def _encode_session_meta(name: str, gist: str) -> str:
-    return json.dumps(
-        {"n": (name or "").strip(), "g": (gist or "").strip()}, ensure_ascii=False
-    )
+def _encode_session_meta(name: str, gist: str, owner: str = "") -> str:
+    data = {"n": (name or "").strip(), "g": (gist or "").strip()}
+    owner_key = (owner or "").strip().lower()
+    if owner_key:
+        data["o"] = owner_key
+    return json.dumps(data, ensure_ascii=False)
 
 
 def _decode_session_meta(summary: Optional[str]) -> tuple:
-    """summary 문자열 → (이름, 요약)."""
+    """summary 문자열 → (이름, 요약, 소유자). 소유자가 빈 문자열이면 주인 세션."""
     raw = (summary or "").strip()
     if not raw:
-        return "", ""
+        return "", "", ""
     if raw.startswith("{"):
         try:
             data = json.loads(raw)
@@ -209,10 +250,11 @@ def _decode_session_meta(summary: Optional[str]) -> tuple:
                 return (
                     str(data.get("n") or "").strip(),
                     str(data.get("g") or "").strip(),
+                    str(data.get("o") or "").strip().lower(),
                 )
         except Exception:
             pass
-    return raw, ""
+    return raw, "", ""
 
 
 def _load_default_meta() -> tuple:
@@ -241,8 +283,12 @@ def _save_default_meta(name: str, gist: str) -> None:
         logger.debug(f"[session] default 메타 저장 실패: {e}")
 
 
-# ADB 스크린샷 감시: /tmp/*.png 전체 감시 → 변경/신규 파일 자동 전송
+# ADB 스크린샷 감시: 세션 디렉터리(/tmp/mizuki_shots/<key>) + /tmp 루트 레거시 감시
 _ADB_SCREENSHOT_DIR = "/tmp"
+# /tmp 루트에 바로 떨어진 캡처(세션 표시 없음)의 중복 전송 방지용 전역 레지스트리.
+# 동시에 도는 세션들의 polling 이 같은 백엔드 프로세스 안에 있으므로, 먼저 집은
+# 세션 하나만 전송하게 해서 한 장이 두 세션 화면에 겹쳐 뜨는 걸 막는다.
+_ROOT_SHOT_CLAIMS: dict = {}
 # 팝업 표시 전 제거할 Live2D 태그 패턴 (표정/시선/볼륨)
 _LIVE2D_TAG_RE = re.compile(
     r'\[(look_\w+|화남|역겨움|즐거움|슬픔|부끄러움|혼란함|volume_up|volume_down)\]'
@@ -1155,6 +1201,10 @@ class LettaAgent(AgentInterface):
         if self._active_conversation_id != _DEFAULT_SESSION_KEY:
             self._session_names.setdefault(self._active_conversation_id, "")
         self._abort_flags: Dict[str, bool] = {}
+        # 세션 소유자 캐시 (conversation_id → 메일, 빈 문자열이면 주인). TODO2 1-10
+        self._session_owners: Dict[str, str] = {_DEFAULT_SESSION_KEY: ""}
+        # 손님 표시 이름 캐시 (메일 → {"name": ...}). 접속 때 백엔드가 채운다.
+        self._guest_profiles: Dict[str, Dict[str, str]] = {}
         # ADB 스크린샷 실시간 전송용 WebSocket send 함수는 _SEND_FN_CTX(ContextVar)에
         # 보관한다 → property _websocket_send_fn 참고. 세션마다 다른 값을 쓰기 때문.
         logger.info(
@@ -1334,36 +1384,50 @@ class LettaAgent(AgentInterface):
     def _conv_to_dict(conv: Any) -> Dict[str, Any]:
         """letta Conversation 객체를 프론트 전송용 dict로."""
         summary = getattr(conv, "summary", None) or ""
-        name, gist = _decode_session_meta(summary)
+        name, gist, owner = _decode_session_meta(summary)
         return {
             "id": str(getattr(conv, "id", "") or ""),
             # summary 는 하위호환용(이름). 프론트는 name/gist 를 쓴다.
             "summary": name,
             "name": name,
             "gist": gist,
+            # 빈 문자열 = 주인(네무린) 세션. 손님 세션은 로그인 메일이 들어온다.
+            "owner": owner,
             "created_at": str(getattr(conv, "created_at", "") or ""),
             "last_message_at": str(getattr(conv, "last_message_at", "") or ""),
             "is_default": False,
         }
 
-    async def list_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def list_sessions(
+        self, limit: int = 100, owner: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """세션 목록. 맨 앞은 항상 기존 단일 대화(default) 가상 세션.
 
         letta의 conversation 목록 API는 default(conversation_id IS NULL)를
         돌려주지 않으므로 프론트에서 쓸 수 있게 직접 끼워 넣는다.
+
+        owner 가 None 이면 전부(주인 시점), 빈 문자열이면 주인 세션만,
+        메일 주소면 그 손님 세션만 돌려준다. default(메인) 세션은 주인 전용이라
+        손님에게는 끼워 넣지 않는다 (TODO2 1-10 세션 격리).
         """
+        owner_key = None if owner is None else (owner or "").strip().lower()
+        guest_view = bool(owner_key)
+
         _dname, _dgist = _load_default_meta()
-        sessions: List[Dict[str, Any]] = [
-            {
-                "id": _DEFAULT_SESSION_KEY,
-                "summary": _dname,
-                "name": _dname,
-                "gist": _dgist,
-                "created_at": "",
-                "last_message_at": "",
-                "is_default": True,
-            }
-        ]
+        sessions: List[Dict[str, Any]] = []
+        if not guest_view:
+            sessions.append(
+                {
+                    "id": _DEFAULT_SESSION_KEY,
+                    "summary": _dname,
+                    "name": _dname,
+                    "gist": _dgist,
+                    "owner": "",
+                    "created_at": "",
+                    "last_message_at": "",
+                    "is_default": True,
+                }
+            )
         try:
             page = await self.client.conversations.list(
                 agent_id=self.id,
@@ -1377,31 +1441,41 @@ class LettaAgent(AgentInterface):
         # 페이지 객체가 아니라 그냥 리스트를 돌려준다 (2026-10-24 실측).
         items = list(getattr(page, "items", None) or page or [])
         converted = [self._conv_to_dict(c) for c in items]
+        if owner_key is not None:
+            converted = [s for s in converted if (s.get("owner") or "") == owner_key]
         # 최근 발화 순. last_message_at이 비어 있으면 created_at으로 대체.
         converted.sort(
             key=lambda s: s["last_message_at"] or s["created_at"],
             reverse=True,
         )
         sessions.extend(converted)
-        logger.info(f"[session] 목록 {len(sessions)}건 (default 포함)")
+        logger.info(
+            f"[session] 목록 {len(sessions)}건 "
+            f"(owner={'all' if owner_key is None else (owner_key or 'nemurin')})"
+        )
         return sessions
 
-    async def create_session(self, summary: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def create_session(
+        self, summary: Optional[str] = None, owner: str = ""
+    ) -> Optional[Dict[str, Any]]:
         """새 세션(conversation) 생성. 기억 블록은 agent 공유이므로 isolated 지정 안 함.
 
         summary 인자는 '사용자가 정한 세션 이름'이다. 한 줄 요약은 대화가 시작된 뒤
         미즈키가 [세션요약] 태그로 채운다.
+        owner 는 손님 세션일 때만 채운다(주인은 빈 문자열).
         """
         try:
             conv = await self.client.conversations.create(
                 agent_id=self.id,
-                summary=_encode_session_meta(summary or "", ""),
+                summary=_encode_session_meta(summary or "", "", owner),
             )
         except Exception as e:
             logger.error(f"[session] conversation 생성 실패: {e}")
             return None
         result = self._conv_to_dict(conv)
-        logger.info(f"[session] 생성 완료 id={result['id']}")
+        logger.info(
+            f"[session] 생성 완료 id={result['id']} owner={owner or 'nemurin'}"
+        )
         return result
 
     async def delete_session(self, conversation_id: str) -> bool:
@@ -1420,15 +1494,39 @@ class LettaAgent(AgentInterface):
         return True
 
     async def _fetch_session_meta(self, conversation_id: str) -> tuple:
-        """conversation 하나의 (이름, 요약) 조회. 실패하면 ("", "")."""
+        """conversation 하나의 (이름, 요약, 소유자) 조회. 실패하면 ("", "", "")."""
         if conversation_id == _DEFAULT_SESSION_KEY:
-            return _load_default_meta()
+            _dname, _dgist = _load_default_meta()
+            return _dname, _dgist, ""
         try:
             conv = await self.client.conversations.retrieve(conversation_id)
         except Exception as e:
             logger.debug(f"[session] 메타 조회 실패 (id={conversation_id}): {e}")
-            return "", ""
+            return "", "", ""
         return _decode_session_meta(getattr(conv, "summary", None))
+
+    def register_guest(self, email: str, name: str = "") -> None:
+        """손님 표시 이름 등록 (TODO2 1-10). 접속할 때 백엔드가 불러준다."""
+        key = (email or "").strip().lower()
+        if not key:
+            return
+        self._guest_profiles[key] = {"name": (name or "").strip()}
+
+    async def session_owner(self, conversation_id: str) -> str:
+        """세션 소유자 메일. 주인 세션이면 빈 문자열 (TODO2 1-10).
+
+        손님 턴 판정(코어 기억 쓰기 차단·도구 차단)의 근거가 되므로
+        조회 실패 시에는 안전한 쪽(손님 아님 = 빈 문자열)이 아니라
+        호출자가 직접 판단하도록 그대로 빈 값을 돌려준다.
+        """
+        if not conversation_id or conversation_id == _DEFAULT_SESSION_KEY:
+            return ""
+        cached = self._session_owners.get(conversation_id)
+        if cached is not None:
+            return cached
+        _name, _gist, owner = await self._fetch_session_meta(conversation_id)
+        self._session_owners[conversation_id] = owner
+        return owner
 
     async def resolve_session_by_key(self, session_key: str) -> tuple:
         """세션 파일 키 → (conversation_id, 표시용 세션 이름).
@@ -1451,7 +1549,7 @@ class LettaAgent(AgentInterface):
 
         name = (self._session_names.get(target) or "").strip()
         if not name:
-            fetched, _ = await self._fetch_session_meta(target)
+            fetched, _gist, _owner = await self._fetch_session_meta(target)
             name = (fetched or "").strip()
             if name:
                 self._session_names[target] = name
@@ -1469,10 +1567,10 @@ class LettaAgent(AgentInterface):
             _save_default_meta(name or _DEFAULT_SESSION_NAME, gist)
             self._session_names[_DEFAULT_SESSION_KEY] = name or _DEFAULT_SESSION_NAME
             return True
-        _, gist = await self._fetch_session_meta(conversation_id)
+        _, gist, owner = await self._fetch_session_meta(conversation_id)
         try:
             await self.client.conversations.update(
-                conversation_id, summary=_encode_session_meta(name, gist)
+                conversation_id, summary=_encode_session_meta(name, gist, owner)
             )
         except Exception as e:
             logger.error(f"[session] 이름 수정 실패 (id={conversation_id}): {e}")
@@ -1490,10 +1588,10 @@ class LettaAgent(AgentInterface):
             _save_default_meta(name, text)
             logger.info(f"[session] 요약 갱신 (default): {text}")
             return True
-        name, _ = await self._fetch_session_meta(conversation_id)
+        name, _, owner = await self._fetch_session_meta(conversation_id)
         try:
             await self.client.conversations.update(
-                conversation_id, summary=_encode_session_meta(name, text)
+                conversation_id, summary=_encode_session_meta(name, text, owner)
             )
         except Exception as e:
             logger.error(f"[session] 요약 갱신 실패 (id={conversation_id}): {e}")
@@ -1630,10 +1728,27 @@ class LettaAgent(AgentInterface):
         # 네무린은 id가 아니라 이름으로 세션을 구분하므로 다른 세션 얘기를 할 때 필요하다.
         _sname = (self._session_name or "").strip()
         if not _sname:
-            _sname, _ = await self._fetch_session_meta(self.conversation_id)
+            _sname, _, _sowner = await self._fetch_session_meta(self.conversation_id)
             self._session_name = _sname
+            if self.conversation_id:
+                self._session_owners.setdefault(self.conversation_id, _sowner)
         if _sname:
             text = f"[세션] {_sname} [/세션]\n" + text
+
+        # 손님 세션이면 누가 말하고 있는지 알려준다 (TODO2 1-10).
+        # 주인(네무린) 세션에는 아무것도 붙이지 않아 기존 동작과 같다.
+        guest_email = await self.session_owner(self.conversation_id)
+        guest_name = ""
+        if guest_email:
+            profile = self._guest_profiles.get(guest_email) or {}
+            guest_name = (profile.get("name") or "").strip() or guest_email.split("@")[0]
+        # letta·hook 프로세스가 손님 턴임을 알 수 있게 /tmp 플래그를 턴마다 맞춘다.
+        write_guest_flag(self.conversation_id, guest_email, guest_name)
+        if guest_email:
+            text = (
+                f"[접속자] 손님 {guest_name} <{guest_email}>. "
+                f"네무린이 아니다. 손님 응대 규칙을 지킬 것. [/접속자]\n" + text
+            )
         input_content = text
 
         # agents.messages.create는 letta에서 deprecated → conversations 엔드포인트 사용.
@@ -1682,10 +1797,28 @@ class LettaAgent(AgentInterface):
         _image_queue: asyncio.Queue = asyncio.Queue()  # ADB 스크린샷 전송용
         _polling_stop = asyncio.Event()
         _notify_file_offset: int = 0
-        # 스트림 시작 시점의 /tmp/*.png mtime 전부 초기화 → 이전 스크린샷 오발송 방지
+        # 캡처 감시 대상: 이 세션 전용 디렉터리 + /tmp 루트(레거시 공용)
+        _shot_dir = screenshot_dir(self._session_key)
+        try:
+            os.makedirs(_shot_dir, exist_ok=True)
+        except Exception as _sd_err:
+            logger.debug(f"[Letta] 스크린샷 디렉터리 생성 실패(무시): {_sd_err}")
+
+        def _shot_paths() -> list:
+            """(경로, 이 세션 전용인지) 목록."""
+            _own = [
+                (_p, True) for _p in _glob.glob(os.path.join(_shot_dir, "*.png"))
+            ]
+            _root = [
+                (_p, False)
+                for _p in _glob.glob(os.path.join(_ADB_SCREENSHOT_DIR, "*.png"))
+            ]
+            return _own + _root
+
+        # 스트림 시작 시점의 mtime 전부 초기화 → 이전 스크린샷 오발송 방지
         _adb_screenshot_mtimes: dict = {
             _p: os.path.getmtime(_p)
-            for _p in _glob.glob(os.path.join(_ADB_SCREENSHOT_DIR, "*.png"))
+            for _p, _ in _shot_paths()
             if os.path.isfile(_p)
         }
 
@@ -1723,12 +1856,17 @@ class LettaAgent(AgentInterface):
             nonlocal _adb_screenshot_mtimes
             while not _polling_stop.is_set():
                 try:
-                    for _path in _glob.glob(os.path.join(_ADB_SCREENSHOT_DIR, "*.png")):
+                    for _path, _own in _shot_paths():
                         try:
                             _mtime = os.path.getmtime(_path)
                             _prev = _adb_screenshot_mtimes.get(_path, 0.0)
                             if _mtime > _prev:
                                 _adb_screenshot_mtimes[_path] = _mtime
+                                if not _own:
+                                    # /tmp 루트 공용 캡처: 먼저 집은 세션만 전송한다.
+                                    if _ROOT_SHOT_CLAIMS.get(_path, 0.0) >= _mtime:
+                                        continue
+                                    _ROOT_SHOT_CLAIMS[_path] = _mtime
                                 _img_bytes = await asyncio.to_thread(
                                     lambda p=_path: open(p, "rb").read()
                                 )

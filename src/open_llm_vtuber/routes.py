@@ -10,6 +10,7 @@ from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
+from .user_identity import extract_identity
 
 
 def init_client_ws_route(
@@ -32,11 +33,15 @@ def init_client_ws_route(
     @router.websocket("/client-ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for client connections"""
+        # 신원 헤더는 핸드셰이크에만 실려 오므로 accept 전에 읽어둔다(TODO2 1-10).
+        identity = extract_identity(websocket.headers)
         await websocket.accept()
         client_uid = str(uuid4())
 
         try:
-            await ws_handler.handle_new_connection(websocket, client_uid)
+            await ws_handler.handle_new_connection(
+                websocket, client_uid, identity=identity
+            )
             await ws_handler.handle_websocket_communication(websocket, client_uid)
         except WebSocketDisconnect:
             await ws_handler.handle_disconnect(client_uid)
@@ -76,8 +81,10 @@ def init_tool_approval_route(ws_handler: WebSocketHandler) -> APIRouter:
             except Exception as e:
                 logger.debug(f"[ToolApproval] 세션 라벨 결정 실패: {e}")
 
+        # 승인 팝업은 주인(네무린)에게만 띄운다. 손님 턴은 hook 단계에서 이미
+        # 전부 거절되므로 여기까지 오지 않고, 와도 손님 화면에는 안 뜬다.
         result = await ws_handler.tool_approval.request_approval(
-            clients=ws_handler.client_connections,
+            clients=ws_handler.owner_connections,
             payload=payload,
         )
         return JSONResponse(result)

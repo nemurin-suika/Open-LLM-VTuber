@@ -34,6 +34,7 @@ from .conversations.single_conversation import process_single_conversation
 from .message_handler import message_handler
 from .tool_approval import ToolApprovalManager
 from . import session_log
+from .user_identity import Identity, OWNER_IDENTITY
 
 
 # ── 턴 완료 마커 ──────────────────────────────────────────────────────────────
@@ -160,13 +161,122 @@ class WebSocketHandler:
         # 인터럽트 직후처럼 자동 소화를 한 번 건너뛸 세션
         self._skip_drain: set = set()
 
+        # 접속자 신원 (client_uid → Identity). 헤더 없는 로컬 접속은 주인. TODO2 1-10
+        self.client_identities: Dict[str, Identity] = {}
+        # 클라이언트가 보고 있는 세션 (client_uid → conversation_id).
+        # 손님이 들어와도 네무린의 활성 세션을 끌고 가지 않게 따로 둔다.
+        self._client_sessions: Dict[str, str] = {}
+
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
 
+    # ── 접속자 신원 헬퍼 (TODO2 1-10) ─────────────────────────────────────
+
+    def _identity(self, client_uid: Optional[str]) -> Identity:
+        """client_uid 의 접속자. 모르는 접속은 주인으로 간주(로컬 경로)."""
+        if not client_uid:
+            return OWNER_IDENTITY
+        return self.client_identities.get(client_uid) or OWNER_IDENTITY
+
+    def _owner_filter(self, client_uid: Optional[str]) -> Optional[str]:
+        """세션 목록 조회용 소유자 필터.
+
+        주인도 자기 세션만 본다(빈 문자열 = 주인 소유). 관리 권한은 있지만
+        손님 방까지 목록에 섞이면 불편해서 메일별로 완전히 가른다
+        (2026-10-29 네무린 결정). 전부 보려면 owner=None 을 직접 넘긴다.
+        """
+        ident = self._identity(client_uid)
+        return "" if ident.is_owner else ident.email
+
+    async def _owns_session(
+        self, agent: Any, client_uid: Optional[str], conversation_id: str
+    ) -> bool:
+        """그 세션을 이 접속자가 건드려도 되는지. 주인은 전부 허용."""
+        ident = self._identity(client_uid)
+        if ident.is_owner:
+            return True
+        getter = getattr(agent, "session_owner", None)
+        if not callable(getter):
+            return False
+        try:
+            owner = await getter(conversation_id)
+        except Exception as e:
+            logger.warning(
+                f"[identity] 세션 소유자 조회 실패 (id={conversation_id}): {e}"
+            )
+            return False
+        return bool(owner) and owner == ident.email
+
+    def _client_for_session(self, session_id: str) -> str:
+        """그 세션을 보고 있는 접속자의 client_uid.
+
+        못 찾으면 가장 최근 접속자(기존 동작)로 폴백한다. 세션이 주인 것이면
+        주인 쪽 연결을 우선한다.
+        """
+        if session_id:
+            for uid, sid in self._client_sessions.items():
+                if sid == session_id and uid in self.client_connections:
+                    return uid
+        for uid in reversed(list(self.client_connections.keys())):
+            if self._identity(uid).is_owner:
+                return uid
+        # 주인이 안 붙어 있는데 그 세션을 보는 사람도 없다면 보낼 곳이 없다.
+        # 여기서 아무 손님에게나 넘기면 남의 대화가 새어 나간다(TODO2 1-10).
+        return ""
+
+    @property
+    def owner_connections(self) -> Dict[str, WebSocket]:
+        """주인(네무린) 연결만. 손님에게 새어 나가면 안 되는 알림용."""
+        return {
+            uid: ws
+            for uid, ws in self.client_connections.items()
+            if self._identity(uid).is_owner
+        }
+
+    async def _clients_for_session(self, session_id: str) -> List[tuple]:
+        """그 세션 소식을 받아도 되는 접속자 목록 [(uid, ws)].
+
+        주인은 전부 받는다. 손님은 자기가 보고 있거나 자기 소유인 세션만.
+        """
+        out: List[tuple] = []
+        for uid, ws in list(self.client_connections.items()):
+            if self._identity(uid).is_owner:
+                out.append((uid, ws))
+                continue
+            if self._client_sessions.get(uid) == session_id:
+                out.append((uid, ws))
+                continue
+            ctx = self.client_contexts.get(uid)
+            agent = getattr(ctx, "agent_engine", None)
+            if agent is not None and await self._owns_session(agent, uid, session_id):
+                out.append((uid, ws))
+        return out
+
+    async def _deny_session_action(self, websocket: WebSocket, action: str) -> None:
+        logger.warning(f"[identity] 남의 세션 {action} 시도를 막았어")
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "session-error",
+                    "action": action,
+                    "message": "그 세션에는 접근 권한이 없어.",
+                },
+                ensure_ascii=False,
+            )
+        )
+
     # ── 다중 세션 헬퍼 ────────────────────────────────────────────────────
 
-    def _active_session_id(self) -> str:
-        """사용자가 지금 보고 있는 세션 id."""
+    def _active_session_id(self, client_uid: Optional[str] = None) -> str:
+        """사용자가 지금 보고 있는 세션 id.
+
+        client_uid 를 주면 그 접속자가 보고 있는 세션을 먼저 쓴다. 손님과 주인이
+        같이 붙어 있어도 서로의 세션을 덮어쓰지 않게 하기 위한 것(TODO2 1-10).
+        """
+        if client_uid:
+            mine = self._client_sessions.get(client_uid)
+            if mine:
+                return str(mine)
         for ctx in self.client_contexts.values():
             agent = getattr(ctx, "agent_engine", None)
             active = getattr(agent, "active_conversation_id", None)
@@ -261,7 +371,8 @@ class WebSocketHandler:
                 "count": len(self._session_buffers.get(session_id, [])),
             }
         )
-        for ws in list(self.client_connections.values()):
+        # 남의 방 배지가 손님 화면에 뜨지 않게 소유자에게만 보낸다(TODO2 1-10).
+        for _uid, ws in await self._clients_for_session(session_id):
             try:
                 await ws.send_text(payload)
             except Exception:
@@ -372,7 +483,7 @@ class WebSocketHandler:
             {"type": "session-queue", "session_id": session_id, "items": items},
             ensure_ascii=False,
         )
-        for ws in list(self.client_connections.values()):
+        for _uid, ws in await self._clients_for_session(session_id):
             try:
                 await ws.send_text(payload)
             except Exception:
@@ -475,7 +586,7 @@ class WebSocketHandler:
         if pq is not None:
             await pq.put((last, ready, session_id))
         else:
-            await self._replay_to_client(last)
+            await self._replay_to_client(last, session_id=session_id)
 
     async def _send_replay_message(self, websocket: WebSocket, raw: str) -> None:
         """Record delivery before sending a notification that can trigger an ack."""
@@ -487,11 +598,13 @@ class WebSocketHandler:
             mark_turn_stage("delivered")
         await websocket.send_text(raw)
 
-    async def _replay_to_client(self, messages: List[str]) -> None:
+    async def _replay_to_client(
+        self, messages: List[str], session_id: str = ""
+    ) -> None:
         """파이프라인이 없을 때 쓰는 단순 전송 (순서 지연 없음)."""
         if not self.client_connections:
             return
-        ws = self.client_connections.get(next(reversed(self.client_connections)))
+        ws = self.client_connections.get(self._client_for_session(session_id))
         if not ws:
             return
         for raw in messages:
@@ -538,7 +651,10 @@ class WebSocketHandler:
         }
 
     async def handle_new_connection(
-        self, websocket: WebSocket, client_uid: str
+        self,
+        websocket: WebSocket,
+        client_uid: str,
+        identity: Optional[Identity] = None,
     ) -> None:
         """
         Handle new WebSocket connection setup
@@ -546,11 +662,14 @@ class WebSocketHandler:
         Args:
             websocket: The WebSocket connection
             client_uid: Unique identifier for the client
+            identity: 앞단 nginx 가 넘겨준 접속자 (없으면 주인)
 
         Raises:
             Exception: If initialization fails
         """
         try:
+            self.client_identities[client_uid] = identity or OWNER_IDENTITY
+
             session_service_context = await self._init_service_context(
                 websocket.send_text, client_uid
             )
@@ -559,11 +678,16 @@ class WebSocketHandler:
                 websocket, client_uid, session_service_context
             )
 
+            await self._ensure_guest_session(websocket, client_uid)
+
             await self._send_initial_messages(
                 websocket, client_uid, session_service_context
             )
 
-            logger.info(f"Connection established for client {client_uid}")
+            logger.info(
+                f"Connection established for client {client_uid} "
+                f"({self._identity(client_uid).label})"
+            )
 
         except Exception as e:
             logger.error(
@@ -571,6 +695,53 @@ class WebSocketHandler:
             )
             await self._cleanup_failed_connection(client_uid)
             raise
+
+    async def _ensure_guest_session(
+        self, websocket: WebSocket, client_uid: str
+    ) -> None:
+        """접속자가 볼 세션을 정한다 (TODO2 1-10).
+
+        주인은 기존처럼 전역 활성 세션을 그대로 본다. 손님은 자기 소유 세션만
+        볼 수 있고, 한 번도 온 적 없으면 자기 방을 하나 만들어 준다. 같은 메일로
+        세션을 여러 개 가질 수 있고, 추가 생성은 프론트의 새 세션 버튼으로 한다.
+        """
+        ident = self._identity(client_uid)
+        agent = self._get_letta_agent(client_uid)
+
+        if ident.is_owner:
+            self._client_sessions[client_uid] = self._active_session_id()
+            return
+
+        if agent is None:
+            logger.error("[identity] 손님 접속인데 세션 지원 agent 가 없어")
+            return
+
+        register = getattr(agent, "register_guest", None)
+        if callable(register):
+            register(ident.email, ident.name)
+
+        try:
+            sessions = await agent.list_sessions(owner=ident.email)
+        except Exception as e:
+            logger.error(f"[identity] 손님 세션 조회 실패: {e}")
+            sessions = []
+
+        if not sessions:
+            created = await agent.create_session(
+                summary=f"{ident.label}의 방", owner=ident.email
+            )
+            if created is None:
+                logger.error(f"[identity] 손님 세션 생성 실패 ({ident.email})")
+                return
+            sessions = [created]
+            logger.info(
+                f"[identity] 손님 방 생성 ({ident.email}) id={created['id']}"
+            )
+
+        self._client_sessions[client_uid] = str(sessions[0]["id"])
+        logger.info(
+            f"[identity] 손님 {ident.label} → 세션 {self._client_sessions[client_uid]}"
+        )
 
     async def _store_client_data(
         self,
@@ -618,6 +789,8 @@ class WebSocketHandler:
                     "client_uid": client_uid,
                     "wind_effect_config": wind_config,
                     "idle_gaze_config": idle_gaze_config,
+                    # TODO2 1-10: 접속자 본인 신원. 주인 전용 UI 노출 판단에 쓴다.
+                    "viewer": self._identity(client_uid).to_dict(),
                 }
             )
         )
@@ -756,6 +929,8 @@ class WebSocketHandler:
         self.client_connections.pop(client_uid, None)
         self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
+        self.client_identities.pop(client_uid, None)
+        self._client_sessions.pop(client_uid, None)
         if client_uid in self.current_conversation_tasks:
             task = self.current_conversation_tasks[client_uid]
             if task and not task.done():
@@ -794,7 +969,7 @@ class WebSocketHandler:
         if not self.client_connections:
             logger.debug("No active clients — dropping live event")
             return None
-        client_uid = next(reversed(self.client_connections))
+        client_uid = self._client_for_session("")  # 주인 연결 우선
         websocket = self.client_connections.get(client_uid)
         context = self.client_contexts.get(client_uid)
         if not websocket or not context:
@@ -877,7 +1052,9 @@ class WebSocketHandler:
             try:
                 if not self.client_connections:
                     return
-                client_uid = next(reversed(self.client_connections))
+                # 이 세션을 보고 있는 접속자에게 보낸다. 손님과 주인이 같이 붙어
+                # 있을 때 남의 답이 넘어가지 않게 하기 위함(TODO2 1-10).
+                client_uid = self._client_for_session(sid)
                 ws = self.client_connections.get(client_uid)
                 context = self.client_contexts.get(client_uid)
                 if not context:
@@ -1012,7 +1189,7 @@ class WebSocketHandler:
             try:
                 if not self.client_connections:
                     return
-                client_uid = next(reversed(self.client_connections))
+                client_uid = self._client_for_session("")  # 주인 연결 우선
                 context = self.client_contexts.get(client_uid)
                 if not context:
                     return
@@ -1063,7 +1240,7 @@ class WebSocketHandler:
             try:
                 if not self.client_connections:
                     return
-                client_uid = next(reversed(self.client_connections))
+                client_uid = self._client_for_session("")  # 주인 연결 우선
                 context = self.client_contexts.get(client_uid)
                 if not context:
                     return
@@ -1097,11 +1274,13 @@ class WebSocketHandler:
                 return
             # 비활성 세션의 발화는 지금 보여주지 않고 모아둔다.
             # 사용자가 그 세션으로 넘어올 때 꺼내서 재생한다(마지막 턴만 음성).
-            if session_id and session_id != self._active_session_id():
+            # 받을 사람은 그 세션을 보고 있는 접속자. 손님이 나중에 붙었다고 해서
+            # 주인 세션의 답이 손님 화면으로 가면 안 된다(TODO2 1-10).
+            client_uid = self._client_for_session(session_id or "")
+            if session_id and session_id != self._active_session_id(client_uid):
                 self._buffer_session_turn(session_id, list(messages))
                 await self._notify_session_activity(session_id)
                 return
-            client_uid = next(reversed(self.client_connections))
             ws = self.client_connections.get(client_uid)
             if not ws:
                 return
@@ -1115,7 +1294,9 @@ class WebSocketHandler:
 
             def _left_session() -> bool:
                 """사용자가 이 세션을 떠났는지."""
-                return bool(session_id) and session_id != self._active_session_id()
+                return bool(session_id) and session_id != self._active_session_id(
+                    client_uid
+                )
 
             async def _play_wait(duration: float) -> bool:
                 """오디오 한 덩어리가 재생되는 동안 대기. 중간에 세션이 바뀌면 True.
@@ -1227,7 +1408,7 @@ class WebSocketHandler:
                         # slot timeout 시 그 세션의 claude -p 프로세스만 종료
                         try:
                             if self.client_connections:
-                                _uid = next(reversed(self.client_connections))
+                                _uid = self._client_for_session("")
                                 _ctx = self.client_contexts.get(_uid)
                                 if _ctx and hasattr(_ctx, "agent_engine"):
                                     _agent = _ctx.agent_engine
@@ -1577,13 +1758,42 @@ class WebSocketHandler:
         2. LettaAgent의 abort 플래그 설정 → 스트리밍 루프 조기 종료
         3. 프론트엔드에 conversation-chain-end 전송 → aiState → idle
         """
-        logger.info(f"[Interrupt] {client_uid}에서 인터럽트 신호 수신")
+        ident = self._identity(client_uid)
+        logger.info(
+            f"[Interrupt] {client_uid}({ident.label})에서 인터럽트 신호 수신"
+        )
 
         # 1. 지금 보고 있는 세션의 capture task만 취소 (다른 세션 작업은 보존)
         target_sid = str(
             (data.get("session_id") if isinstance(data, dict) else None)
-            or self._active_session_id()
+            or self._active_session_id(client_uid)
         )
+
+        # 손님은 자기 소유 세션만 멈출 수 있다. 프론트는 음성 감지(VAD)에서도
+        # 인터럽트를 자동 전송하므로, 검사가 없으면 손님 쪽 마이크 소음만으로도
+        # 주인의 작업이 죽는다. 실제로 2026-10-29 23:23 에 그 사고가 있었다.
+        if not ident.is_owner:
+            context = self.client_contexts.get(client_uid)
+            agent = getattr(context, "agent_engine", None) or self._any_agent()
+            allowed = False
+            if agent is not None:
+                allowed = await self._owns_session(agent, client_uid, target_sid)
+            if not allowed:
+                logger.warning(
+                    f"[Interrupt] 손님 {ident.label} 의 남의 세션 중단 시도를 막았어 "
+                    f"(session={target_sid})"
+                )
+                # 요청자 UI 는 풀어준다. 남의 작업은 건드리지 않는다.
+                try:
+                    await websocket.send_text(
+                        json.dumps(
+                            {"type": "control", "text": "conversation-chain-end"}
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[Interrupt] 거부 응답 전송 실패: {e}")
+                return
+
         # 인터럽트는 "멈춰"라는 신호다. 대기열에 쌓인 입력을 곧바로 이어 돌리면
         # 멈춘 것처럼 보이지 않으므로, 이번 턴 종료 시 자동 소화를 한 번 건너뛴다.
         # 다만 적어둔 말을 지우지는 않고 보류 상태로 남겨둔다 (TODO25).
@@ -1633,6 +1843,12 @@ class WebSocketHandler:
     ) -> None:
         """Handle request for chat history list"""
         context = self.client_contexts[client_uid]
+        # 구 파일 히스토리는 캐릭터 단위라 소유자 구분이 없다. 손님에게는 비운다.
+        if not self._identity(client_uid).is_owner:
+            await websocket.send_text(
+                json.dumps({"type": "history-list", "histories": []})
+            )
+            return
         histories = get_history_list(context.character_config.conf_uid)
         await websocket.send_text(
             json.dumps({"type": "history-list", "histories": histories})
@@ -1644,6 +1860,9 @@ class WebSocketHandler:
         """Handle fetching and setting specific chat history"""
         history_uid = data.get("history_uid")
         if not history_uid:
+            return
+        if not self._identity(client_uid).is_owner:
+            await self._deny_session_action(websocket, "history")
             return
 
         context = self.client_contexts[client_uid]
@@ -1681,16 +1900,21 @@ class WebSocketHandler:
         return agent
 
     async def _send_session_list(
-        self, websocket: WebSocket, agent: Any, extra: Optional[dict] = None
+        self,
+        websocket: WebSocket,
+        agent: Any,
+        extra: Optional[dict] = None,
+        client_uid: Optional[str] = None,
     ) -> None:
         try:
-            sessions = await agent.list_sessions()
+            # 손님에게는 자기 세션만 보여준다 (TODO2 1-10 세션 격리).
+            sessions = await agent.list_sessions(owner=self._owner_filter(client_uid))
         except Exception as e:
             logger.error(f"[session] 목록 조회 중 오류: {e}")
             sessions = []
-        active_id = getattr(agent, "active_conversation_id", None) or getattr(
-            agent, "conversation_id", "default"
-        )
+        active_id = self._client_sessions.get(client_uid or "") or getattr(
+            agent, "active_conversation_id", None
+        ) or getattr(agent, "conversation_id", "default")
         payload = {
             "type": "session-list",
             "sessions": sessions,
@@ -1729,9 +1953,9 @@ class WebSocketHandler:
                 )
             )
             return
-        await self._send_session_list(websocket, agent)
+        await self._send_session_list(websocket, agent, client_uid=client_uid)
         # 새로고침 후에도 대기 중인 입력 말풍선이 되살아나게 스냅샷을 같이 보낸다
-        await self._notify_session_queue(self._active_session_id())
+        await self._notify_session_queue(self._active_session_id(client_uid))
 
     async def _handle_create_session(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1740,7 +1964,11 @@ class WebSocketHandler:
         agent = self._get_letta_agent(client_uid)
         if agent is None:
             return
-        created = await agent.create_session(summary=data.get("summary") or "")
+        # 손님이 만든 세션은 그 손님 소유로 찍는다. 주인은 빈 값(기존과 동일).
+        created = await agent.create_session(
+            summary=data.get("summary") or "",
+            owner=self._identity(client_uid).key,
+        )
         if created is None:
             await websocket.send_text(
                 json.dumps(
@@ -1753,9 +1981,14 @@ class WebSocketHandler:
                 )
             )
             return
-        agent.set_conversation(created["id"], name=created.get("name") or "")
+        self._client_sessions[client_uid] = created["id"]
+        if self._identity(client_uid).is_owner:
+            agent.set_conversation(created["id"], name=created.get("name") or "")
         await self._send_session_list(
-            websocket, agent, extra={"created_id": created["id"]}
+            websocket,
+            agent,
+            extra={"created_id": created["id"]},
+            client_uid=client_uid,
         )
 
     async def _handle_switch_session(
@@ -1766,8 +1999,16 @@ class WebSocketHandler:
         if agent is None:
             return
         target = data.get("conversation_id") or "default"
-        # 프론트가 세션 이름을 같이 보내면 바로 반영(없으면 agent가 letta에서 조회).
-        active = agent.set_conversation(target, name=data.get("name"))
+        if not await self._owns_session(agent, client_uid, target):
+            await self._deny_session_action(websocket, "switch")
+            return
+        self._client_sessions[client_uid] = target
+        # 전역 활성 세션은 주인만 움직인다. 손님 전환이 네무린 화면을 끌고 가면 안 됨.
+        if self._identity(client_uid).is_owner:
+            # 프론트가 세션 이름을 같이 보내면 바로 반영(없으면 agent가 letta에서 조회).
+            active = agent.set_conversation(target, name=data.get("name"))
+        else:
+            active = target
         pending_turns = len(self._session_buffers.get(active, []))
         still_running = active in self._capture_tasks
         await websocket.send_text(
@@ -1788,8 +2029,8 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: dict
     ) -> None:
         """세션으로 넘어와 기록 복원을 끝낸 뒤, 보류된 마지막 발화를 음성으로 재생."""
-        target = str(data.get("conversation_id") or self._active_session_id())
-        if target != self._active_session_id():
+        target = str(data.get("conversation_id") or self._active_session_id(client_uid))
+        if target != self._active_session_id(client_uid):
             # 그 사이 또 옮겨갔다면 재생하지 않고 버퍼를 그대로 둔다.
             return
         # 떠난 세션의 재생이 아직 남은 조각을 보류 버퍼로 되돌리는 중일 수 있다.
@@ -1804,7 +2045,7 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: dict
     ) -> None:
         """대기 중인 입력 한 건 취소 (적어놓고 마음이 바뀐 경우, TODO25)."""
-        sid = str(data.get("session_id") or self._active_session_id())
+        sid = str(data.get("session_id") or self._active_session_id(client_uid))
         target = str(data.get("id") or "")
         queue = self._pending_inputs.get(sid) or []
         remain = [e for e in queue if e["id"] != target]
@@ -1823,6 +2064,9 @@ class WebSocketHandler:
         if agent is None:
             return
         target = data.get("conversation_id") or ""
+        if not await self._owns_session(agent, client_uid, target):
+            await self._deny_session_action(websocket, "delete")
+            return
         # 지워지는 세션에서 돌던 작업과 쌓인 발화도 같이 정리
         _task = self._capture_tasks.pop(target, None)
         if _task and not _task.done():
@@ -1832,10 +2076,14 @@ class WebSocketHandler:
         self._skip_drain.discard(target)
         session_log.drop_session_log(target)
         success = await agent.delete_session(target)
+        if success and self._client_sessions.get(client_uid) == target:
+            self._client_sessions.pop(client_uid, None)
+            await self._ensure_guest_session(websocket, client_uid)
         await self._send_session_list(
             websocket,
             agent,
             extra={"deleted_id": target if success else None},
+            client_uid=client_uid,
         )
 
     async def _handle_rename_session(
@@ -1846,8 +2094,11 @@ class WebSocketHandler:
             return
         target = data.get("conversation_id") or ""
         summary = data.get("summary") or ""
+        if not await self._owns_session(agent, client_uid, target):
+            await self._deny_session_action(websocket, "rename")
+            return
         await agent.update_session_summary(target, summary)
-        await self._send_session_list(websocket, agent)
+        await self._send_session_list(websocket, agent, client_uid=client_uid)
 
     async def _handle_fetch_letta_history(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -1867,6 +2118,21 @@ class WebSocketHandler:
             return
 
         agent = getattr(context, "agent_engine", None)
+        # 세션을 지정하지 않고 온 요청은 전역 활성 세션(= 주인이 마지막으로 쓰던 방)
+        # 으로 떨어져 남의 대화가 손님 화면에 복원된다. 접속자가 보고 있는 세션으로
+        # 항상 채워서 넘긴다 (TODO2 1-10).
+        _target = str(data.get("conversation_id") or "") or self._active_session_id(
+            client_uid
+        )
+        # 손님 요청에 세션 id 가 비어 있으면 그대로 막는다. 빈 값을 넘기면
+        # letta 쪽 기본값(= 주인이 쓰던 방)으로 떨어져 주인 대화가 복원된다.
+        if not _target and self._identity(client_uid).is_guest:
+            await self._deny_session_action(websocket, "history")
+            return
+        # 남의 세션 대화를 id 만 바꿔 넣어 읽는 걸 막는다 (TODO2 1-10).
+        if _target and not await self._owns_session(agent, client_uid, _target):
+            await self._deny_session_action(websocket, "history")
+            return
         fetcher = getattr(agent, "fetch_history_messages", None)
         if fetcher is None:
             # letta 이외 agent에서는 조용히 빈 결과 (프론트가 기존 경로로 폴백)
@@ -1888,7 +2154,7 @@ class WebSocketHandler:
             result = await fetcher(
                 limit=int(data.get("limit") or 50),
                 before=data.get("before"),
-                conversation_id=data.get("conversation_id"),
+                conversation_id=_target,
             )
         except Exception as e:
             logger.error(f"[history] letta 히스토리 조회 중 오류: {e}")
@@ -1899,10 +2165,7 @@ class WebSocketHandler:
         # 위로 스크롤한 추가 로드(before)에서는 과거 구간만 보내므로 건드리지 않는다.
         if not data.get("before"):
             try:
-                restored = session_log.merge_history(
-                    data.get("conversation_id") or self._active_session_id(),
-                    restored,
-                )
+                restored = session_log.merge_history(_target, restored)
             except Exception as e:
                 logger.error(f"[history] 보조 로그 병합 실패: {e}")
 
@@ -1915,8 +2178,7 @@ class WebSocketHandler:
                     "has_more": result.get("has_more", False),
                     "append": bool(data.get("before")),
                     "supported": True,
-                    "conversation_id": data.get("conversation_id")
-                    or self._active_session_id(),
+                    "conversation_id": _target,
                 },
                 ensure_ascii=False,
             )
@@ -2098,7 +2360,7 @@ class WebSocketHandler:
         # 큐에서 꺼낼 때쯤 사용자가 다른 세션으로 옮겨가 있어도 저장 위치가 안 흔들린다.
         metadata.setdefault(
             "session_id",
-            str(data.get("session_id") or self._active_session_id()),
+            str(data.get("session_id") or self._active_session_id(client_uid)),
         )
 
         # letta 는 턴이 끝난 뒤에야 발화를 저장한다. 작업을 시켜 두고 다른 세션에
@@ -2204,6 +2466,11 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """프론트가 보낸 Claude 도구 승인/거부 결정을 중계기로 전달."""
+        if not self._identity(client_uid).is_owner:
+            logger.warning(
+                f"[identity] 손님 {self._identity(client_uid).label} 의 도구 승인 응답을 무시했어"
+            )
+            return
         request_id = data.get("request_id")
         if not request_id:
             logger.warning("tool-approval-response 에 request_id 없음")

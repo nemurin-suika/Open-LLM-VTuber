@@ -170,8 +170,32 @@ def _emit(decision: str, reason: str = "", hook_event_name: str = "PreToolUse") 
     sys.exit(0)
 
 
+# ── 손님 턴 도구 차단 (TODO2 1-10) ───────────────────────────────────────────
+# 네무린 결정(2026-10-29): 손님 앞에서는 도구 전면 금지, 웹 검색만 허용.
+# 손님 세션이면 네무린 승인 팝업까지 올리지 않고 여기서 바로 거절한다.
+# 손님 세션인지는 백엔드가 턴마다 써 두는 /tmp 플래그 파일로 판단한다.
+_WEB_TOOLS = ("WebFetch", "WebSearch")
+
+
+def _guest_flag_path() -> str:
+    key = (os.environ.get("MIZUKI_SESSION_KEY") or "").strip()
+    if not key or key == "default":
+        return "/tmp/mizuki_guest.flag"
+    return f"/tmp/mizuki_guest_{key}.flag"
+
+
+def _guest_info() -> dict:
+    """손님 세션이면 {"email":..., "name":...}, 주인 세션이면 빈 dict."""
+    try:
+        with open(_guest_flag_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and data.get("email") else {}
+    except Exception:
+        return {}
+
+
 def _is_safe_auto(tool_name: str, tool_input: dict) -> bool:
-    if tool_name == "WebFetch":
+    if tool_name in _WEB_TOOLS:
         return True
     if tool_name == "Read":
         fp = str(tool_input.get("file_path", ""))
@@ -352,9 +376,18 @@ def main() -> None:
     # Claude Code가 직접 실행될 때 transcript_path로 [알림:...] fallback 제공
     transcript_path = payload.get("transcript_path", "")
 
-    # 1) 안전한 기존 자동 도구
+    # 1) 안전한 기존 자동 도구 (웹 검색·스크린샷 읽기)
     if _is_safe_auto(tool_name, tool_input):
         _emit("allow", hook_event_name=hook_event_name)
+
+    # 1-1) 손님 세션이면 그 외 도구는 전부 거절. allowlist 도 타지 않는다.
+    guest = _guest_info()
+    if guest:
+        _emit(
+            "deny",
+            f"손님({guest.get('email')}) 세션에서는 웹 검색 외 도구를 쓸 수 없습니다",
+            hook_event_name,
+        )
 
     options = _rule_options(tool_name, tool_input)
 
